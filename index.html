@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Falling Sand Demo</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #0a0a0f; overflow: hidden; width: 100%; height: 100%; }
+  #game-container { display: flex; align-items: center; justify-content: center; width: 100vw; height: 100vh; }
+  canvas { image-rendering: pixelated; }
+  #audio-toggle {
+    position: fixed; z-index: 10; top: 12px; right: 12px;
+    border: 1px solid #454a66; border-radius: 4px; padding: 7px 10px;
+    background: #11121a; color: #dfe4ff; font: 12px monospace;
+    cursor: pointer; opacity: 0.88;
+  }
+  #audio-toggle:hover, #audio-toggle:focus-visible { opacity: 1; border-color: #66d9ff; outline: none; }
+</style>
+</head>
+<body>
+<div id="game-container"></div>
+<button id="audio-toggle" type="button" aria-pressed="false" aria-label="Enable game sound">Enable sound (M)</button>
+<script src="https://cdn.jsdelivr.net/npm/phaser@3.70.0/dist/phaser.min.js"></script>
+<script src="world.js"></script>
+<script src="fx.js"></script>
+<script src="sprites.js"></script>
+<script src="audio.js"></script>
+<script src="spells.js"></script>
+<script src="enemies.js"></script>
+<script src="menu.js"></script>
+<script src="game.js"></script>
+<script>GameAudio.bindButton(document.getElementById('audio-toggle'));</script>
+</body>
+</html>
