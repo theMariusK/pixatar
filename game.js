@@ -155,6 +155,10 @@ class SandScene extends Phaser.Scene {
     // Present in every mode so targeting and damage can call into it unconditionally;
     // only campaign actually puts anything in it.
     this.enemies = new EnemySystem(this);
+    // Bending: the left mouse button's third mode, next to dig and cast. B cycles
+    // dig -> water -> earth -> dig; bendElement says which bender has the button.
+    this.benders = { Water: new WaterBending(this), Earth: new EarthBending(this) };
+    this.bendElement = 'Water';
 
     this.projectiles = [];
     this.debris = [];
@@ -173,7 +177,7 @@ class SandScene extends Phaser.Scene {
     this.castGlowElement = null;
     this.prevLeftDown = false;
     this.prevRightDown = false;
-    this.leftClickMode = 'dig'; // 'dig' | 'primary'
+    this.leftClickMode = 'dig'; // 'dig' | 'primary' | 'bend'
     this.rightClickMode = 'legacy'; // 'legacy' | 'secondary'
 
     this.player = {
@@ -249,6 +253,7 @@ class SandScene extends Phaser.Scene {
       r: Phaser.Input.Keyboard.KeyCodes.R,
       q: Phaser.Input.Keyboard.KeyCodes.Q,
       e: Phaser.Input.Keyboard.KeyCodes.E,
+      b: Phaser.Input.Keyboard.KeyCodes.B,
       esc: Phaser.Input.Keyboard.KeyCodes.ESC,
     });
 
@@ -591,7 +596,7 @@ class SandScene extends Phaser.Scene {
         '',
         `hostiles  ${alive} left   ·   ${killed}/${this.campaignGoal} down`,
         '',
-        `LMB  ${this.leftClickMode === 'primary' ? describe('primary') : 'dig'}`,
+        `LMB  ${this.leftButtonLabel(describe)}`,
         `RMB  ${this.rightClickMode === 'secondary' ? describe('secondary') : 'place'}`,
       ]);
       this.statusHudText.setText(this.statusHudLines().join('\n'));
@@ -608,7 +613,7 @@ class SandScene extends Phaser.Scene {
     this.hudText.setText([
       mode,
       '',
-      `LMB  ${this.leftClickMode === 'primary' ? describe('primary') : 'dig'}`,
+      `LMB  ${this.leftButtonLabel(describe)}`,
       `RMB  ${this.rightClickMode === 'secondary' ? describe('secondary') : 'place'}`,
     ]);
 
@@ -617,6 +622,16 @@ class SandScene extends Phaser.Scene {
     // Dim the whole HUD while the wheel is open so it does not fight the wheel.
     this.hudText.setAlpha(this.wheelOpen ? 0.25 : 1);
     this.statusHudText.setAlpha(this.wheelOpen ? 0.25 : 1);
+  }
+
+  leftButtonLabel(describe) {
+    if (this.leftClickMode === 'primary') return describe('primary');
+    if (this.leftClickMode === 'bend') {
+      const n = this.benders[this.bendElement].holding;
+      const next = this.bendElement === 'Water' ? 'bend earth' : 'dig';
+      return `bend ${this.bendElement.toLowerCase()}${n ? `  (holding ${n})` : ''}   [B: ${next}]`;
+    }
+    return 'dig   [B: bend water]';
   }
 
   // The active-effect readout, shared by every mode's HUD.
@@ -2181,8 +2196,16 @@ class SandScene extends Phaser.Scene {
 
     this.brushGfx.clear();
 
-    // left mouse button: an assembled primary spell takes priority over digging
-    if (this.leftClickMode === 'primary') {
+    // left mouse button: bending, an assembled primary spell, or digging
+    if (this.leftClickMode === 'bend') {
+      // Hold to lift water or earth near the cursor and carry it; release to let go.
+      const bender = this.benders[this.bendElement];
+      if (leftJustDown) bender.begin();
+      else if (!p.leftButtonDown()) bender.release();
+      const ring = this.bendElement === 'Earth' ? 0xc8a064 : 0x66b8ff;
+      this.brushGfx.lineStyle(1, ring, p.leftButtonDown() ? 0.8 : 0.45)
+        .strokeCircle(p.worldX, p.worldY, bender.grabRadius * PIXEL);
+    } else if (this.leftClickMode === 'primary') {
       // A channelled spell (Flamethrower, Frost Spray, Telekinesis, any Beam) is held
       // rather than fired: start it on press, let updateChannels drive it while the
       // button is down, and end it on release. Everything else still resolves on the
@@ -2226,7 +2249,7 @@ class SandScene extends Phaser.Scene {
     // waits to respawn, including the random-world reset key.
     if (this.player.dead) {
       if (Phaser.Input.Keyboard.JustDown(k.esc)) this.returnToMenu();
-      for (const key of [k.one, k.two, k.three, k.four, k.five, k.six, k.seven, k.eight, k.nine, k.r, k.q, k.e]) {
+      for (const key of [k.one, k.two, k.three, k.four, k.five, k.six, k.seven, k.eight, k.nine, k.r, k.q, k.e, k.b]) {
         Phaser.Input.Keyboard.JustDown(key);
       }
       return;
@@ -2247,6 +2270,21 @@ class SandScene extends Phaser.Scene {
       // it now means "dig" again.
       this.stopChannel('primary');
       this.stopChannel('secondary');
+    }
+
+    // B cycles the left mouse button through dig -> bend water -> bend earth -> dig.
+    // A bender lets go of whatever it holds on its own when it loses the button
+    // (bending.js).
+    if (Phaser.Input.Keyboard.JustDown(k.b)) {
+      this.stopChannel('primary');
+      if (this.leftClickMode !== 'bend') {
+        this.leftClickMode = 'bend';
+        this.bendElement = 'Water';
+      } else if (this.bendElement === 'Water') {
+        this.bendElement = 'Earth';
+      } else {
+        this.leftClickMode = 'dig';
+      }
     }
 
     // Esc leaves the world and goes back to the menu.
@@ -3002,6 +3040,9 @@ class SandScene extends Phaser.Scene {
 
     this.updateSpellWheel();
     this.handlePointer();
+    // Every bender updates, not just the selected one: water and rock already let
+    // go are still in the air and have to land.
+    for (const k in this.benders) this.benders[k].update(dt);
     // Channels tick after handlePointer, so a spray started this frame sprays this
     // frame rather than waiting one.
     this.updateChannels(dt);
@@ -3022,6 +3063,7 @@ class SandScene extends Phaser.Scene {
     this.drawRemotePlayers(dt);
     this.drawProjectiles();
     this.drawDebris();
+    for (const k in this.benders) this.benders[k].draw();
     this.drawOrbitSpells();
     this.drawMines();
     this.enemies.draw(dt);
