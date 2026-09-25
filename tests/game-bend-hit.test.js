@@ -11,6 +11,7 @@ const Phaser = {
   AUTO: 0,
   Scale: { FIT: 0, CENTER_BOTH: 0 },
   Math: { Clamp: (n, lo, hi) => Math.max(lo, Math.min(hi, n)) },
+  Input: { Keyboard: { JustUp: () => false } },
   Game: class {},
 };
 const casts = [];
@@ -72,6 +73,15 @@ test('air hit changes player impulse without damage', () => {
   assert.equal(s.player.health, 100);
 });
 
+test('orbit knockback can spare the caster', () => {
+  const s = scene();
+  s.debris = [];
+  s.enemies = { list: [] };
+  s.knockback(60, 66, 40, 120, 0, 0, true);
+  assert.equal(s.player.impulseX, 0);
+  assert.equal(s.player.vy, 0);
+});
+
 test('fire spells emit particles from the caster on cast and while channeling', () => {
   const s = scene();
   const bursts = [];
@@ -91,4 +101,58 @@ test('fire spells emit particles from the caster on cast and while channeling', 
   const before = bursts.length;
   s.updateChannels(0.1);
   assert.ok(bursts.length > before);
+});
+
+test('Fire Q wheel selects form and outer Punch action independently', () => {
+  const s = scene();
+  s.bendElement = 'Fire';
+  s.bendStyle = { Fire: 'Bolt' };
+  s.bendAction = { Fire: 'Normal' };
+  s.benders = { Fire: { form: 'Bolt' } };
+  s.wheelGfx = { clear() {} };
+  s.wheelPreviewText = { setVisible() {} };
+  s.keys.q = {};
+  s.drawBendWheel = () => {};
+  s.input = { activePointer: { x: 360, y: 240 } };
+  s.openBendWheel();
+  s.updateBendWheel(); // inner left half: Orbit
+  s.input.activePointer.x = 540;
+  s.updateBendWheel(); // outer right half: Punch
+  s.closeBendWheel();
+  assert.equal(s.bendStyle.Fire, 'Orbit');
+  assert.equal(s.bendAction.Fire, 'Punch');
+  assert.equal(s.benders.Fire.form, 'Orbit');
+
+  s.input.activePointer.x = 300;
+  s.openBendWheel();
+  s.updateBendWheel(); // outer left half: Normal
+  s.closeBendWheel();
+  assert.equal(s.bendAction.Fire, 'Normal');
+});
+
+test('right-click uses Fire Punch while fire bending', () => {
+  const s = scene();
+  let punches = 0, spellCasts = 0;
+  s.leftClickMode = 'bend';
+  s.bendElement = 'Fire';
+  s.bendAction = { Fire: 'Punch' };
+  s.benders = { Fire: { grabRadius: 6, punch() { punches++; }, begin() {}, release() {} } };
+  s.rightClickMode = 'secondary';
+  s.castWheelSpell = () => { spellCasts++; };
+  s.stopChannel = () => {};
+  s.prevLeftDown = true;
+  s.prevRightDown = false;
+  s.brushGfx = {
+    clear() { return this; },
+    lineStyle() { return this; },
+    strokeCircle() { return this; },
+  };
+  s.materialIndex = 0;
+  s.input = { activePointer: {
+    worldX: 100, worldY: 100,
+    leftButtonDown: () => true, rightButtonDown: () => true,
+  } };
+  s.handlePointer();
+  assert.equal(punches, 1);
+  assert.equal(spellCasts, 0);
 });

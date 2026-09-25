@@ -75,12 +75,12 @@ for (const ring of WHEEL_RINGS) {
   ring.segAngle = (Math.PI * 2) / ring.segments;
 }
 
-// Bending's own Form picker (bending.js). Modifiers aren't wired up for
-// bending yet, so this is one ring, not three, and it isn't keyed by
-// primary/secondary slot the way the spell wheel is — bending only has one
-// button. A third/fourth form is just another array entry.
+// Bending's inner ring chooses a form. Fire adds an outer action ring: Punch
+// consumes the held embers through the selected form.
 const BEND_FORMS = ['Bolt', 'Orbit'];
 const BEND_FORM_RING = { rMin: 30, rMax: 90, baseColor: 0x4a4a58 };
+const FIRE_BEND_ACTIONS = ['Punch', 'Normal'];
+const BEND_ACTION_RING = { rMin: 98, rMax: 150, baseColor: 0x7c3828 };
 
 class SandScene extends Phaser.Scene {
   constructor() {
@@ -174,8 +174,10 @@ class SandScene extends Phaser.Scene {
     // picker while a bend is selected; a bender reads its own `.form` field
     // directly, so this is just the remembered choice plus the picker's state.
     this.bendStyle = { Water: 'Bolt', Earth: 'Bolt', Fire: 'Bolt', Air: 'Bolt' };
+    this.bendAction = { Fire: 'Normal' };
     this.bendWheelOpen = false;
     this.bendFormSel = 0;
+    this.bendActionSel = 1;
 
     this.projectiles = [];
     this.debris = [];
@@ -640,7 +642,10 @@ class SandScene extends Phaser.Scene {
       mode,
       '',
       `LMB  ${this.leftButtonLabel(describe)}`,
-      `RMB  ${this.rightClickMode === 'secondary' ? describe('secondary') : 'place'}`,
+      `RMB  ${this.leftClickMode === 'bend' && this.bendElement === 'Fire'
+        && this.bendAction.Fire === 'Punch'
+        ? (this.bendStyle.Fire === 'Orbit' ? 'punch: radial fire burst' : 'punch: fireball')
+        : this.rightClickMode === 'secondary' ? describe('secondary') : 'place'}`,
     ]);
 
     this.statusHudText.setText(this.statusHudLines().join('\n'));
@@ -659,7 +664,8 @@ class SandScene extends Phaser.Scene {
         : this.bendElement === 'Fire' ? 'bend air'
         : 'dig';
       const form = this.bendStyle[this.bendElement];
-      return `bend ${this.bendElement.toLowerCase()} · ${form}${n ? `  (holding ${n})` : ''}   [B: ${next}] [Q: form]`;
+      const action = this.bendElement === 'Fire' ? ` + ${this.bendAction.Fire}` : '';
+      return `bend ${this.bendElement.toLowerCase()} · ${form}${action}${n ? `  (holding ${n})` : ''}   [B: ${next}] [Q: shape${action ? '/action' : ''}]`;
     }
     return 'dig   [B: bend water]';
   }
@@ -1087,11 +1093,11 @@ class SandScene extends Phaser.Scene {
   // spell, which is why flooding a burning room works the way you would expect.
   // Kinetic shove on the local player and on loose debris. Water's whole identity is
   // force rather than damage, and Earth's is weight, so both lean on this heavily.
-  knockback(x, y, radiusPx, strength, pushX = 0, pushY = 0) {
+  knockback(x, y, radiusPx, strength, pushX = 0, pushY = 0, skipPlayer = false) {
     const p = this.player;
     const pcx = p.x + p.w / 2, pcy = p.y + p.h / 2;
     const d = Math.hypot(pcx - x, pcy - y);
-    if (d < radiusPx) {
+    if (!skipPlayer && d < radiusPx) {
       const falloff = 1 - d / radiusPx;
       const ang = d < 1 ? -Math.PI / 2 : Math.atan2(pcy - y, pcx - x);
       p.impulseX = Phaser.Math.Clamp(p.impulseX + Math.cos(ang) * strength * falloff + pushX * falloff, -600, 600);
@@ -2304,8 +2310,14 @@ class SandScene extends Phaser.Scene {
       this.brushGfx.lineStyle(1, 0x888888, 0.35).strokeCircle(p.worldX, p.worldY, DIG_RADIUS * PIXEL);
     }
 
-    // right mouse button: an assembled secondary spell takes priority over placing the selected material
-    if (this.rightClickMode === 'secondary') {
+    // Fire's selected Punch action uses the right button while fire bending.
+    if (this.leftClickMode === 'bend' && this.bendElement === 'Fire'
+      && this.bendAction.Fire === 'Punch') {
+      this.stopChannel('secondary');
+      if (rightJustDown && !this.bendWheelOpen) this.benders.Fire.punch();
+      this.brushGfx.lineStyle(1, 0xff7733, 0.7)
+        .strokeCircle(p.worldX, p.worldY, 7 * PIXEL);
+    } else if (this.rightClickMode === 'secondary') {
       if (this.isChannelCombo('secondary')) {
         if (rightJustDown) this.beginChannel('secondary');
         else if (!p.rightButtonDown()) this.stopChannel('secondary');
@@ -2461,19 +2473,18 @@ class SandScene extends Phaser.Scene {
     console.log(`${slot} spell assembled: ${combo.element} + ${combo.form} + ${combo.modifier}`);
   }
 
-  // ---------- bending's Form picker ----------
+  // ---------- bending's shape and action picker ----------
   //
-  // A single-ring version of the spell wheel above: hold Q, drag to browse,
-  // release Q to lock in. It picks a Form for whichever element is currently
-  // bending (this.bendElement) rather than a combo for a primary/secondary
-  // slot, so it deliberately doesn't reuse WHEEL_RINGS/drawSpellWheel's data
-  // shape — that shape assumes three rings and two slots, neither of which
-  // apply here. Revisit once bending grows Modifiers too.
+  // All elements choose Bolt or Orbit on the inner ring. Fire also chooses
+  // Normal or Punch on an outer ring. Sweep both rings while holding Q.
 
   openBendWheel() {
     if (this.bendWheelOpen) return;
     this.bendWheelOpen = true;
     this.bendFormSel = Math.max(0, BEND_FORMS.indexOf(this.bendStyle[this.bendElement]));
+    if (this.bendElement === 'Fire') {
+      this.bendActionSel = Math.max(0, FIRE_BEND_ACTIONS.indexOf(this.bendAction.Fire));
+    }
   }
 
   closeBendWheel() {
@@ -2483,6 +2494,9 @@ class SandScene extends Phaser.Scene {
     const form = BEND_FORMS[this.bendFormSel];
     this.bendStyle[this.bendElement] = form;
     this.benders[this.bendElement].form = form;
+    if (this.bendElement === 'Fire') {
+      this.bendAction.Fire = FIRE_BEND_ACTIONS[this.bendActionSel];
+    }
   }
 
   updateBendWheel() {
@@ -2497,6 +2511,12 @@ class SandScene extends Phaser.Scene {
       if (a < 0) a += Math.PI * 2;
       const segAngle = (Math.PI * 2) / BEND_FORMS.length;
       this.bendFormSel = Math.min(BEND_FORMS.length - 1, Math.floor(a / segAngle));
+    } else if (this.bendElement === 'Fire'
+      && dist >= BEND_ACTION_RING.rMin && dist <= BEND_ACTION_RING.rMax) {
+      let a = Math.atan2(dy, dx);
+      if (a < 0) a += Math.PI * 2;
+      const segAngle = (Math.PI * 2) / FIRE_BEND_ACTIONS.length;
+      this.bendActionSel = Math.min(FIRE_BEND_ACTIONS.length - 1, Math.floor(a / segAngle));
     }
     this.drawBendWheel();
     if (Phaser.Input.Keyboard.JustUp(k.q)) this.closeBendWheel();
@@ -2524,10 +2544,37 @@ class SandScene extends Phaser.Scene {
       const ix = cx + Math.cos(mid) * rMid, iy = cy + Math.sin(mid) * rMid;
       this.drawWheelIcon(gfx, BEND_FORMS[i], ix, iy, isSelected ? 12 : 9, 0xffffff, isSelected ? 1 : 0.7);
     }
+    if (this.bendElement === 'Fire') {
+      const actionAngle = (Math.PI * 2) / FIRE_BEND_ACTIONS.length;
+      const actionMid = (BEND_ACTION_RING.rMin + BEND_ACTION_RING.rMax) / 2;
+      for (let i = 0; i < FIRE_BEND_ACTIONS.length; i++) {
+        const start = i * actionAngle, end = start + actionAngle;
+        const selected = i === this.bendActionSel;
+        gfx.fillStyle(BEND_ACTION_RING.baseColor, selected ? 0.95 : 0.4);
+        gfx.beginPath();
+        gfx.arc(cx, cy, BEND_ACTION_RING.rMax, start, end, false);
+        gfx.arc(cx, cy, BEND_ACTION_RING.rMin, end, start, true);
+        gfx.closePath();
+        gfx.fillPath();
+        gfx.lineStyle(1, 0x000000, 0.35);
+        gfx.strokePath();
+        const mid = start + actionAngle / 2;
+        this.drawWheelIcon(gfx, FIRE_BEND_ACTIONS[i],
+          cx + Math.cos(mid) * actionMid, cy + Math.sin(mid) * actionMid,
+          selected ? 12 : 9, 0xffffff, selected ? 1 : 0.7);
+      }
+    }
     gfx.fillStyle(0xffffff, 0.85);
     gfx.fillCircle(cx, cy, 4);
     this.wheelPreviewText.setVisible(true);
-    this.wheelPreviewText.setText(`BEND FORM (${this.bendElement}): ${BEND_FORMS[this.bendFormSel]}`);
+    const form = BEND_FORMS[this.bendFormSel];
+    const action = this.bendElement === 'Fire' ? FIRE_BEND_ACTIONS[this.bendActionSel] : null;
+    const result = action === 'Punch'
+      ? form === 'Bolt' ? 'Fireball' : 'Radial fire burst'
+      : null;
+    this.wheelPreviewText.setText(
+      `BEND (${this.bendElement}): ${form}${action ? ` + ${action}` : ''}${result ? `  [${result} · RMB]` : ''}`
+    );
   }
 
   drawSpellWheel() {
@@ -2649,6 +2696,16 @@ class SandScene extends Phaser.Scene {
         gfx.lineTo(cx - s, cy);
         gfx.closePath();
         gfx.strokePath();
+        gfx.fillCircle(cx, cy, s * 0.18);
+        break;
+
+      // -- bending actions --
+      case 'Punch':
+        gfx.fillRect(cx - s * 0.8, cy - s * 0.32, s * 1.1, s * 0.64);
+        gfx.fillTriangle(cx + s, cy, cx + s * 0.2, cy - s * 0.7, cx + s * 0.2, cy + s * 0.7);
+        break;
+      case 'Normal':
+        gfx.strokeCircle(cx, cy, s * 0.65);
         gfx.fillCircle(cx, cy, s * 0.18);
         break;
 

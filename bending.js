@@ -99,7 +99,7 @@ const ORBIT = {
 };
 
 // Shoves anything caught within ORBIT.HIT_RADIUS of (x, y) — the ring's own
-// strike. Modest and knockback-only by design, not a new damage system.
+// strike. Modest and knockback-only by design, without shoving the bender.
 // Returns whether it hit anything, so callers can throttle per piece.
 function orbitStrike(scene, x, y, strength) {
   const hits = scene.bodiesInRadius(x, y, ORBIT.HIT_RADIUS);
@@ -107,7 +107,7 @@ function orbitStrike(scene, x, y, strength) {
   for (const t of hits) {
     if (!t.self) hit = true;
   }
-  if (hit) scene.knockback(x, y, ORBIT.HIT_RADIUS * 2.4, strength);
+  if (hit) scene.knockback(x, y, ORBIT.HIT_RADIUS * 2.4, strength, 0, 0, true);
   return hit;
 }
 
@@ -116,7 +116,6 @@ function orbitStrike(scene, x, y, strength) {
 function bendContacts(scene, points, pad = PIXEL) {
   if (!points.length) return [];
   const targets = [];
-  if (!scene.player.dead) targets.push({ self: true, body: scene.player });
   for (const id in scene.remotePlayers) {
     if (id === scene.netId) continue;
     const p = scene.remotePlayers[id];
@@ -128,6 +127,12 @@ function bendContacts(scene, points, pad = PIXEL) {
   return targets.filter(({ body }) => points.some(({ x, y }) =>
     x >= body.x - pad && x <= body.x + body.w + pad &&
     y >= body.y - pad && y <= body.y + body.h + pad));
+}
+
+function bendBodyWithin(body, x, y, radius) {
+  const px = Math.max(body.x, Math.min(x, body.x + body.w));
+  const py = Math.max(body.y, Math.min(y, body.y + body.h));
+  return Math.hypot(px - x, py - y) <= radius;
 }
 
 function bendHitReady(cooldowns, key, now, interval) {
@@ -208,10 +213,9 @@ class WaterBending {
     const s = this.scene;
     const now = s.time.now;
     for (const target of bendContacts(s, [...this.held, ...this.free])) {
-      const key = target.self ? 'self' : target.id || target.enemy;
+      const key = target.id || target.enemy;
       if (!bendHitReady(this.hitCooldowns, key, now, 170)) continue;
-      if (target.self) s.receiveHit({ element: 'Water', amount: 0, bend: { wetMs: 450 } });
-      else if (target.enemy) target.enemy.wetUntil = now + 450;
+      if (target.enemy) target.enemy.wetUntil = now + 450;
       else s.reportHit(target.id, 'Water', 0, null, { wetMs: 450 });
       s.fx.burst(target.body.x + target.body.w / 2, target.body.y + target.body.h / 2,
         3, 'Water', { speed: 35, life: 0.25, size: 1 });
@@ -506,15 +510,13 @@ class EarthBending {
     const damage = Math.min(24, 4 + Math.sqrt(rock.cells.length) * 1.1 + impactSpeed * 0.018);
     this.strikeObjects(rock, points, impactSpeed);
     for (const target of bendContacts(s, points, PIXEL * 1.4)) {
-      const key = target.self ? 'self' : target.id || target.enemy;
+      const key = target.id || target.enemy;
       if (!bendHitReady(this.hitCooldowns, key, now, 400)) continue;
       const cx = target.body.x + target.body.w / 2;
       const cy = target.body.y + target.body.h / 2;
       const ix = Math.max(-240, Math.min(240, rock.vx * 0.65));
       const iy = Math.max(-260, Math.min(120, rock.vy * 0.4 - 90));
-      if (target.self) {
-        s.receiveHit({ element: 'Earth', amount: damage, bend: { ix, iy } });
-      } else if (target.enemy) {
+      if (target.enemy) {
         s.damageEnemy(target.enemy, damage, 'Earth');
         target.enemy.impulseX = (target.enemy.impulseX || 0) + ix;
         target.enemy.vy += iy;
@@ -851,8 +853,8 @@ class EarthBending {
 //
 // Water is lifted and earth is torn loose, but there is no fire lying in the
 // grid to take — fire is the one element a bender creates instead of moves.
-// Holding the button kindles embers out of thin air at the cursor. They swirl
-// into a blob the same way held water does, but a kindled ember is burning on
+// Holding the button kindles embers at the caster's hand and pulls them to the
+// cursor. They swirl into a blob the same way held water does, but an ember is burning on
 // borrowed time: left held too long, it simply burns itself out and is gone,
 // so a fire bender can't bank an endless stockpile the way water and earth can.
 //
@@ -864,11 +866,11 @@ class EarthBending {
 // than a stoked blaze.
 
 const FIRE_BEND = {
-  GRAB_RADIUS: 6,        // cells around the cursor new embers are kindled in
+  GRAB_RADIUS: 6,        // targeting ring shown at the cursor
   CONJURE_RATE: 90,      // embers created per second while the button is held
   CAPACITY: 120,         // embers held at once — less than water or earth, since
                           // this mass is free and needs some cap of its own
-  REACH: 95,             // cells from the bender embers may be kindled or held at
+  REACH: 95,             // cells from the bender embers may be held at
   FOLLOW: 8,             // how hard an ember is pulled toward its place in the blob
   RESPONSE: 10,          // how quickly an ember's velocity turns toward that pull
   MAX_SPEED: 560,        // px/s
@@ -879,6 +881,9 @@ const FIRE_BEND = {
   FREE_LIFE: 3,          // seconds a thrown ember may fly before it burns out unlanded
   HOLD_LIFE: 6,          // seconds a kindled ember may be held before it burns out
   EMBER_LIFE_FRAC: 0.5,  // an ember that lands with no fuel gets this fraction of FIRE_LIFE
+  BALL_SPEED: 440,       // px/s after a Bolt Punch
+  BALL_LIFE: 2.2,        // a missed ball cannot fly forever
+  PUNCH_KICK: 340,      // px/s outward speed after an Orbit Punch
 };
 
 class FireBending {
@@ -889,9 +894,9 @@ class FireBending {
     this.grabRadius = FIRE_BEND.GRAB_RADIUS;
     this.held = [];    // embers following the cursor: { x, y, vx, vy, life }
     this.free = [];    // released embers, flying until they land or burn out: { x, y, vx, vy, age }
+    this.fireballs = []; // cohesive Bolt Punch projectiles made from the held embers
     this.active = false;
     this.grabAcc = 0;
-    this.grabOffsets = bendDiscOffsets(FIRE_BEND.GRAB_RADIUS);
     this.settleOffsets = bendDiscOffsets(FIRE_BEND.SETTLE_RADIUS);
     this.gfx = scene.add.graphics().setDepth(8.5);
     this.hitCooldowns = new Map();
@@ -930,6 +935,220 @@ class FireBending {
     return this.held.length;
   }
 
+  // Right-click Punch consumes the hovering fire. Bolt compresses it into a
+  // travelling ball; Orbit releases the same embers in every direction.
+  punch() {
+    if (!this.held.length) return false;
+    const s = this.scene;
+    const p = s.player;
+    const cx = p.x + p.w / 2, cy = p.y + p.h / 2;
+    const count = this.held.length;
+    if (this.form === 'Orbit') {
+      const phase = this.spin || 0;
+      for (let i = 0; i < count; i++) {
+        const ember = this.held[i];
+        const distance = Math.hypot(ember.x - cx, ember.y - cy);
+        const angle = distance > 1
+          ? Math.atan2(ember.y - cy, ember.x - cx)
+          : phase + i * Math.PI * 2 / count;
+        ember.vx = Math.cos(angle) * FIRE_BEND.PUNCH_KICK;
+        ember.vy = Math.sin(angle) * FIRE_BEND.PUNCH_KICK;
+        ember.age = 0;
+        this.free.push(ember);
+      }
+      this.held.length = 0;
+      const radius = ORBIT.RADIUS + 12;
+      this.damageBurst(cx, cy, radius, Math.min(26, 5 + count * 0.14));
+      this.burnDebris(cx, cy, radius);
+      s.fx.shockwave(cx, cy, 'Fire',
+        { r0: ORBIT.RADIUS * 0.35, r1: radius * 1.7, life: 0.38, width: 3, rings: 2 });
+      s.fx.burst(cx, cy, Math.min(35, 8 + count / 3), 'Fire',
+        { speed: 160, life: 0.5, rise: 20, size: 1.4 });
+    } else {
+      let x = 0, y = 0;
+      for (const ember of this.held) { x += ember.x; y += ember.y; }
+      x /= count; y /= count;
+      const aim = s.input.activePointer;
+      const dx = aim.worldX - cx, dy = aim.worldY - cy;
+      const dist = Math.hypot(dx, dy);
+      const ux = dist > 1 ? dx / dist : (p.facing || 1);
+      const uy = dist > 1 ? dy / dist : 0;
+      const size = Math.min(16, 5 + Math.sqrt(count) * 0.85);
+      const embers = [];
+      const visualCount = Math.max(12, Math.min(96, count));
+      for (let i = 0; i < visualCount; i++) {
+        const held = this.held[i % count];
+        const offsetX = held.x - x, offsetY = held.y - y;
+        const offset = Math.hypot(offsetX, offsetY);
+        embers.push({
+          angle: offset > 1 ? Math.atan2(offsetY, offsetX) : i * BEND_GOLDEN,
+          radius: Math.min(size * 0.9, offset * 0.24 + size * (0.2 + Math.random() * 0.5)),
+          spin: (i % 2 ? 1 : -1) * (3 + Math.random() * 6),
+          phase: Math.random() * Math.PI * 2,
+          scale: 0.65 + Math.random() * 0.8,
+        });
+      }
+      this.fireballs.push({
+        x, y, vx: ux * FIRE_BEND.BALL_SPEED, vy: uy * FIRE_BEND.BALL_SPEED,
+        size, mass: count, life: FIRE_BEND.BALL_LIFE, age: 0, trail: 0, embers,
+      });
+      this.held.length = 0;
+      s.fx.burst(x, y, 20, 'Fire', { speed: 110, life: 0.42, size: 1.5, shape: 'square' });
+      s.fx.streaks(x, y, 9, 'Fire', { speed: 180, life: 0.24, size: 1.2 });
+    }
+    return true;
+  }
+
+  // Both Punch forms use the same body damage and burn rules, and neither
+  // includes the caster in its contact list.
+  damageBurst(x, y, radius, amount) {
+    const s = this.scene;
+    const now = s.time.now;
+    for (const target of bendContacts(s, [{ x, y }], radius)) {
+      if (!bendBodyWithin(target.body, x, y, radius)) continue;
+      if (target.enemy) {
+        s.damageEnemy(target.enemy, amount, 'Fire');
+        target.enemy.burnUntil = now + 1200;
+      } else {
+        s.reportHit(target.id, 'Fire', amount, null, { burnMs: 1200 });
+      }
+    }
+  }
+
+  burnDebris(x, y, radius) {
+    const s = this.scene;
+    for (let i = s.debris.length - 1; i >= 0; i--) {
+      const obj = s.debris[i];
+      if (!PixelWorld.FLAMMABILITY[obj.mat]
+        || Math.hypot(obj.x - x, obj.y - y) > radius) continue;
+      s.debris.splice(i, 1);
+      const gx = Math.floor(obj.x / PIXEL), gy = Math.floor(obj.y / PIXEL);
+      if (gx > 0 && gx < COLS - 1 && gy > 0 && gy < ROWS - 1) {
+        const id = s.idx(gx, gy);
+        if (s.grid[id] === EMPTY) {
+          s.setCell(id, FIRE, Math.min(255, PixelWorld.BURN_LIFE[obj.mat]));
+        }
+      }
+      s.fx.burst(obj.x, obj.y, 6, 'Fire', { speed: 60, life: 0.4, rise: 40 });
+    }
+  }
+
+  igniteBurst(x, y, radius) {
+    const s = this.scene;
+    const gx = Math.floor(x / PIXEL), gy = Math.floor(y / PIXEL);
+    for (let dy = -radius; dy <= radius; dy++) {
+      for (let dx = -radius; dx <= radius; dx++) {
+        const distance = Math.hypot(dx, dy);
+        if (distance > radius || Math.random() > 0.65 * (1 - distance / (radius + 1))) continue;
+        const xx = gx + dx, yy = gy + dy;
+        if (xx <= 0 || xx >= COLS - 1 || yy <= 0 || yy >= ROWS - 1) continue;
+        const id = s.idx(xx, yy);
+        const mat = s.grid[id];
+        if (mat === EMPTY || mat === SMOKE || mat === GAS) {
+          s.setCell(id, FIRE, PixelWorld.FIRE_LIFE);
+        } else if (PixelWorld.FLAMMABILITY[mat] > 0) {
+          this.igniteCell(xx, yy);
+        }
+      }
+    }
+  }
+
+  impactFireball(ball, doused = false) {
+    const s = this.scene;
+    const radius = Math.min(14, Math.round(3 + Math.sqrt(ball.mass) * 0.8));
+    if (!doused) {
+      this.igniteBurst(ball.x, ball.y, radius);
+      this.damageBurst(ball.x, ball.y, radius * PIXEL * 1.4,
+        Math.min(36, 9 + ball.mass * 0.2));
+      this.burnDebris(ball.x, ball.y, radius * PIXEL * 1.4);
+    }
+    s.fx.burst(ball.x, ball.y, Math.min(70, 20 + ball.mass / 2),
+      doused ? 'Water' : 'Fire', { speed: 170, life: 0.65, rise: 35, size: 1.5,
+        shape: 'square' });
+    if (!doused) {
+      s.fx.streaks(ball.x, ball.y, 16, 'Fire', { speed: 250, life: 0.3, size: 1.3 });
+      s.fx.smoke(ball.x, ball.y, 7, 'Fire', { speed: 70, life: 0.9, size: 2.4, rise: 45 });
+      s.fx.shockwave(ball.x, ball.y, 'Fire',
+        { r0: ball.size, r1: radius * PIXEL * 1.9, life: 0.4, width: 3, rings: 2 });
+      s.fx.hitstop(35);
+    }
+    s.fx.ring(ball.x, ball.y, doused ? 'Water' : 'Fire',
+      { r0: 2, r1: radius * PIXEL * 1.6, life: 0.35, width: 3 });
+    if (!doused) s.fx.shake('Fire', 0.004 + Math.min(ball.mass, 100) * 0.00004, 110);
+  }
+
+  fireballEmberPoint(ball, ember) {
+    const angle = ember.angle + ball.age * ember.spin
+      + Math.sin(ball.age * 13 + ember.phase) * 0.22;
+    const radius = ember.radius * (0.76 + Math.sin(ball.age * 19 + ember.phase) * 0.2);
+    return {
+      x: ball.x + Math.cos(angle) * radius,
+      y: ball.y + Math.sin(angle) * radius,
+    };
+  }
+
+  emitFireballTrail(ball, fromX, fromY) {
+    const s = this.scene;
+    const distance = Math.hypot(ball.x - fromX, ball.y - fromY);
+    if (distance < 0.001) return;
+    const spacing = 7;
+    const ux = ball.vx / FIRE_BEND.BALL_SPEED, uy = ball.vy / FIRE_BEND.BALL_SPEED;
+    const sideX = -uy, sideY = ux;
+    let next = spacing - ball.trail;
+    while (next <= distance) {
+      const t = next / distance;
+      const scatter = (Math.random() - 0.5) * ball.size * 1.4;
+      const x = fromX + (ball.x - fromX) * t + sideX * scatter;
+      const y = fromY + (ball.y - fromY) * t + sideY * scatter;
+      s.fx.burst(x, y, 2, 'Fire', {
+        speed: 55, angle: Math.atan2(-uy, -ux), spread: 1.6,
+        life: 0.48, rise: 20, size: 1.2, shape: 'square',
+        color: Math.random() < 0.35 ? FX_PALETTE.Fire.core : FX_PALETTE.Fire.spark,
+      });
+      if (Math.random() < 0.25) {
+        s.fx.smoke(x, y, 1, 'Fire', { speed: 18, life: 0.6, size: 1.3, rise: 25 });
+      }
+      next += spacing;
+    }
+    ball.trail = (ball.trail + distance) % spacing;
+  }
+
+  updateFireballs(dt) {
+    const s = this.scene;
+    for (let i = this.fireballs.length - 1; i >= 0; i--) {
+      const ball = this.fireballs[i];
+      ball.life -= dt;
+      ball.age += dt;
+      const fromX = ball.x, fromY = ball.y;
+      const steps = Math.max(1, Math.ceil(Math.max(Math.abs(ball.vx), Math.abs(ball.vy)) * dt / PIXEL));
+      const sx = ball.vx * dt / steps, sy = ball.vy * dt / steps;
+      let impact = false, doused = false;
+      for (let k = 0; k < steps; k++) {
+        ball.x += sx; ball.y += sy;
+        const gx = Math.floor(ball.x / PIXEL), gy = Math.floor(ball.y / PIXEL);
+        if (gx <= 0 || gx >= COLS - 1 || gy <= 0 || gy >= ROWS - 1) {
+          impact = true; doused = true; break;
+        }
+        const mat = s.grid[s.idx(gx, gy)];
+        if (mat === WATER) { impact = true; doused = true; break; }
+        if (IS_SOLID[mat]) { impact = true; break; }
+        if (s.debris.some((obj) => Math.hypot(obj.x - ball.x, obj.y - ball.y) <= ball.size + PIXEL)) {
+          impact = true; break;
+        }
+        if (bendContacts(s, [ball], ball.size).some((t) => bendBodyWithin(t.body, ball.x, ball.y, ball.size))) {
+          impact = true; break;
+        }
+      }
+      if (ball.life <= 0) impact = true;
+      this.emitFireballTrail(ball, fromX, fromY);
+      if (impact) {
+        this.impactFireball(ball, doused);
+        this.fireballs.splice(i, 1);
+        continue;
+      }
+    }
+  }
+
   target() {
     return bendTarget(this.scene, FIRE_BEND.REACH);
   }
@@ -951,6 +1170,7 @@ class FireBending {
       if (this.form === 'Orbit') this.steerOrbit(dt); else this.steerHeld(dt);
     }
     if (this.free.length) this.updateFree(dt);
+    if (this.fireballs.length) this.updateFireballs(dt);
     this.touchBodies();
     this.touchObjects();
   }
@@ -959,11 +1179,9 @@ class FireBending {
     const s = this.scene;
     const now = s.time.now;
     for (const target of bendContacts(s, [...this.held, ...this.free])) {
-      const key = target.self ? 'self' : target.id || target.enemy;
+      const key = target.id || target.enemy;
       if (!bendHitReady(this.hitCooldowns, key, now, 230)) continue;
-      if (target.self) {
-        s.receiveHit({ element: 'Fire', amount: 3, bend: { burnMs: 1200 } });
-      } else if (target.enemy) {
+      if (target.enemy) {
         s.damageEnemy(target.enemy, 3, 'Fire');
         target.enemy.burnUntil = now + 1200;
       } else {
@@ -997,9 +1215,9 @@ class FireBending {
     }
   }
 
-  // Kindle new embers near the cursor, nearest first, up to the rate and the
-  // capacity. Nothing is removed from the world — this is the one bend that
-  // creates instead of drawing on what's already there.
+  // Kindle actual embers at the caster's hand. Steering carries them to the
+  // cursor, so fire visibly travels from the body instead of appearing at aim.
+  // Nothing is removed from the world when they are created.
   grab(dt) {
     if (this.held.length >= FIRE_BEND.CAPACITY) { this.grabAcc = 0; return; }
     const s = this.scene;
@@ -1009,19 +1227,20 @@ class FireBending {
     this.grabAcc -= n;
 
     const p = s.player;
-    const pgx = (p.x + p.w / 2) / PIXEL, pgy = (p.y + p.h / 2) / PIXEL;
-    const pointer = s.input.activePointer;
-    const cgx = Math.floor(pointer.worldX / PIXEL), cgy = Math.floor(pointer.worldY / PIXEL);
-    for (const [dx, dy] of this.grabOffsets) {
-      if (n <= 0 || this.held.length >= FIRE_BEND.CAPACITY) break;
-      const x = cgx + dx, y = cgy + dy;
-      if (x <= 0 || x >= COLS - 1 || y <= 0 || y >= ROWS - 1) continue;
-      if (Math.hypot(x - pgx, y - pgy) > FIRE_BEND.REACH) continue;
+    const sourceX = p.x + p.w / 2 + (p.facing || 1) * p.w * 0.35;
+    const sourceY = p.y + p.h * 0.38;
+    const target = this.target();
+    const dx = target.x - sourceX, dy = target.y - sourceY;
+    const dist = Math.max(1, Math.hypot(dx, dy));
+    n = Math.min(n, FIRE_BEND.CAPACITY - this.held.length);
+    for (let i = 0; i < n; i++) {
       this.held.push({
-        x: x * PIXEL + PIXEL / 2, y: y * PIXEL + PIXEL / 2, vx: 0, vy: 0,
+        x: sourceX + (Math.random() - 0.5) * 2,
+        y: sourceY + (Math.random() - 0.5) * 2,
+        vx: this.form === 'Orbit' ? 0 : dx / dist * 105,
+        vy: this.form === 'Orbit' ? 0 : dy / dist * 105,
         life: FIRE_BEND.HOLD_LIFE,
       });
-      n--;
     }
     this.grabAcc = Math.min(this.grabAcc, 1);
   }
@@ -1169,7 +1388,7 @@ class FireBending {
   draw() {
     const g = this.gfx;
     g.clear();
-    if (!this.held.length && !this.free.length) return;
+    if (!this.held.length && !this.free.length && !this.fireballs.length) return;
     const pal = FX_PALETTE.Fire;
     // A faint hot halo around the held blob, so a fire bender's swirl reads as
     // heat, not as a fistful of floating embers.
@@ -1187,6 +1406,17 @@ class FireBending {
         // A hair larger than a cell, so embers at fractional positions do not
         // leave seams between them.
         g.fillRect(d.x - PIXEL / 2 - 0.5, d.y - PIXEL / 2 - 0.5, PIXEL + 1, PIXEL + 1);
+      }
+    }
+    for (const ball of this.fireballs) {
+      for (const ember of ball.embers) {
+        const pt = this.fireballEmberPoint(ball, ember);
+        const flicker = Math.sin(ball.age * 27 + ember.phase);
+        const width = PIXEL * ember.scale * (0.8 + Math.max(0, flicker) * 0.35);
+        const color = flicker > 0.55 ? pal.core : flicker < -0.4 ? pal.accent : pal.glow;
+        g.fillStyle(pal.deep, 0.24).fillRect(pt.x - width, pt.y - width, width * 2, width * 2);
+        g.fillStyle(color, 0.8 + Math.max(0, flicker) * 0.2)
+          .fillRect(pt.x - width / 2, pt.y - width / 2, width, width);
       }
     }
   }
