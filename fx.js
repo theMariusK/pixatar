@@ -45,6 +45,7 @@ const FX_PALETTE = {
   Lightning: { core: 0xffffff, glow: 0x9f7cff, deep: 0x2a1a7a, spark: 0xd0c0ff, accent: 0x66ccff, smoke: 0x5a4a8a },
   Dark: { core: 0xcc88ff, glow: 0x7a3bcf, deep: 0x1a0530, spark: 0x9a5ae0, accent: 0x4a1080, smoke: 0x1c0a2e },
   Arcane: { core: 0xeafcff, glow: 0x66d9ff, deep: 0x116688, spark: 0xa0f0ff, accent: 0x9966ff, smoke: 0x2a5a70 },
+  Air: { core: 0xf0fbff, glow: 0xb8e6f0, deep: 0x5c7a82, spark: 0xdff5fa, accent: 0x9fd8e8, smoke: 0xc8ecf5 },
 };
 
 // Fallback so an unknown element still draws something rather than throwing.
@@ -60,6 +61,7 @@ const FX_SHAKE = {
   Lightning: { amp: 0.7, dur: 0.4 }, // a snap, gone before you register it
   Dark: { amp: 0.55, dur: 2.2 },   // a shudder that will not quite stop
   Arcane: { amp: 1.15, dur: 0.75 },
+  Air: { amp: 0.6, dur: 0.5 },   // a snap of pressure, gone as fast as Lightning's
 };
 
 // Particle motion models. Each is a per-frame tweak applied on top of the shared
@@ -97,6 +99,11 @@ const FX_MOTION = {
   Arcane: (p, dt) => {
     p.vx *= 0.99;              // clean geometric travel, no gravity
     p.vy *= 0.99;
+  },
+  Air: (p, dt) => {
+    p.vx *= 0.985;              // barely any drag — a gust carries far
+    p.vy *= 0.985;
+    p.vy -= 30 * dt;             // a light upward loft, never a fall
   },
 };
 

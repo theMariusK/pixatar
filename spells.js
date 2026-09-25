@@ -2607,6 +2607,119 @@ const ELEMENTS = {
       });
     },
   },
+
+  // -- Air: pure force, the same identity AirBending has. It never writes, moves
+  //    or creates a single cell, and it deals no direct damage of its own — every
+  //    hit is a gust, and the knockback is the whole payoff. Nothing here is hand-
+  //    tuned per modifier the way Fire or Dark are; it leans on the same shared
+  //    knockback/detonate machinery every element already has. ---------------------
+  Air: {
+    radius: 8,
+    directDamage: 0,
+    boltSpeed: 420,    // the fastest bolt of any element — wind doesn't hang in the air
+    boltGravity: 0,
+    beamRange: 60,
+    beamRangePierce: 95,
+    beamWidth: 3,
+    groundLength: 18,
+    orbitRadius: 40,
+    orbitSpeed: 4.2,
+
+    // Gust: shoves everything nearby away from the impact point. The push is the
+    // hit — the same force AirBending's own gust applies (bending.js, AirBending).
+    impact(s, ctx, r) {
+      const cx = ctx.gx * PIXEL, cy = ctx.gy * PIXEL;
+      s.knockback(cx, cy, r * PIXEL * 2.4, 130 + r * 9);
+      s.fx.burst(cx, cy, Math.min(22, 8 + r), 'Air', { speed: 130 + r * 6, life: 0.4, size: 1.4 });
+    },
+
+    signature(s, ctx, r, opts = {}) {
+      const cx = ctx.gx * PIXEL, cy = ctx.gy * PIXEL;
+      s.fx.shockwave(cx, cy, 'Air', { r0: 3, r1: r * PIXEL * 2, life: 0.35, width: 3, rings: 2 });
+      if (opts.minor) return;
+      s.fx.shake('Air', Math.min(0.008, 0.003 + r * 0.0003), 90);
+    },
+
+    // A straight gust: nothing is painted, but anything the ray passes is shoved
+    // along with it. Stops at the first wall like any other beam (Pierce excepted).
+    beamStep(s, gx, gy, ctx) {
+      if (s.solidAtCell(gx, gy)) return ctx.pierce ? null : 'block';
+      s.knockback(gx * PIXEL, gy * PIXEL, 26, 90,
+        Math.cos(ctx.beamAngle) * 40, Math.sin(ctx.beamAngle) * 40);
+      if (Math.random() < 0.4) {
+        s.fx.streaks(gx * PIXEL, gy * PIXEL, 2, 'Air', { speed: 140, life: 0.25, angle: ctx.beamAngle, spread: 0.5 });
+      }
+      return null;
+    },
+
+    // Windrow: the wave doesn't move the ground, only what's standing on it.
+    groundStep(s, x, y, ctx) {
+      let gy = y;
+      for (let i = 0; i < 5 && !s.solidAtCell(x, gy + 1); i++) gy++;
+      s.knockback(x * PIXEL, gy * PIXEL, 30, 110, ctx.facing * 90, -40);
+      if (Math.random() < 0.5) s.fx.burst(x * PIXEL, gy * PIXEL, 2, 'Air', { speed: 60, life: 0.3, size: 1 });
+    },
+
+    // A ring of wind circling the caster, buffeting anything it swings past.
+    orbitTick(s, gx, gy, r, ctx, o) {
+      s.knockback(gx * PIXEL, gy * PIXEL, r * PIXEL * 1.3, 80);
+      if (Math.random() < 0.3) s.fx.burst(gx * PIXEL, gy * PIXEL, 1, 'Air', { speed: 40, life: 0.3, size: 1 });
+    },
+
+    // A wake of wind trailing the bolt, the same idea as the orbit's.
+    trailStep(s, gx, gy) {
+      s.knockback(gx * PIXEL, gy * PIXEL, 18 * PIXEL, 60);
+    },
+
+    // Vacuum: pulls everything nearby inward instead of throwing it out. Nothing
+    // is drained — Air never deals direct damage — just dragged toward the point.
+    absorb(s, ctx, r) {
+      const cx = ctx.gx * PIXEL, cy = ctx.gy * PIXEL;
+      s.knockback(cx, cy, r * PIXEL * 2.6, -(160 + r * 8));
+      s.fx.burst(cx, cy, 16, 'Air', { speed: 90, life: 0.5, rise: -20 });
+    },
+
+    // A squall: several gusts landing outward from the impact in quick succession.
+    volatile(s, ctx, r) {
+      for (let i = 0; i < 4; i++) {
+        s.time.delayedCall(90 + i * 90, () => {
+          const ang = Math.random() * Math.PI * 2;
+          const dist = r * (0.6 + i * 0.5);
+          const ox = Math.round(ctx.gx + Math.cos(ang) * dist);
+          const oy = Math.round(ctx.gy + Math.sin(ang) * dist * 0.6);
+          detonateNow(s, { ...ctx, modifier: null, gx: ox, gy: oy }, Math.max(3, Math.round(r * 0.45)));
+        });
+      }
+    },
+
+    // Air chains between bodies directly rather than through terrain — there is no
+    // conductive material for wind, only whoever else is standing nearby.
+    chainTargets(s, gx, gy, range) {
+      const hits = s.bodiesInRadius(gx * PIXEL, gy * PIXEL, range * PIXEL);
+      return hits.filter((t) => !t.self).map((t) => [Math.round(t.x / PIXEL), Math.round(t.y / PIXEL)]);
+    },
+
+    chain(s, ctx, r) {
+      const targets = ELEMENTS.Air.chainTargets(s, ctx.gx, ctx.gy, r + 10);
+      Phaser.Utils.Array.Shuffle(targets);
+      const picked = targets.slice(0, 4);
+      for (let i = 0; i < picked.length; i++) {
+        const [tx, ty] = picked[i];
+        s.time.delayedCall(100 + i * 100, () => {
+          s.fx.streaks(ctx.gx * PIXEL, ctx.gy * PIXEL, 3, 'Air', {
+            speed: 160, life: 0.3, angle: Math.atan2(ty - ctx.gy, tx - ctx.gx),
+          });
+          detonateNow(s, { ...ctx, modifier: null, gx: tx, gy: ty }, Math.max(3, Math.round(r * 0.5)));
+        });
+      }
+    },
+
+    // Default Anchor: a few gusts pulsing outward, the same repeating-pulse
+    // machinery every other element's default Anchor builds on.
+    pulse(s, ctx, r, n) {
+      anchorPulses(s, ctx, r, n, { interval: 0.5, scale: () => 0.7 });
+    },
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -3229,6 +3342,9 @@ const CHANNEL_PROFILE = {
   Lightning: { half: 0.13, rays: 1, dps: 40, cadence: 0.05, puff: 2 },
   Dark: { half: 0.07, rays: 1, dps: 26, cadence: 0.05, puff: 2 },
   Arcane: { half: 0.05, rays: 1, dps: 30, cadence: 0.045, puff: 2 },
+  // Air never deals direct damage, held or not — the knockback in beamStep is
+  // the whole effect, so this channel carries no dps of its own.
+  Air: { half: 0.22, rays: 2, dps: 0, cadence: 0.05, puff: 2 },
 };
 
 // Telekinesis only reaches this far from the player — the whole point of the ability

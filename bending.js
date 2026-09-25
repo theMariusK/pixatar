@@ -1,8 +1,17 @@
 // Bending: hold the left mouse button over water or earth and it comes with you.
 //
-// B cycles the left mouse button through dig -> bend water -> bend earth -> dig. Water
-// is below; earth (EarthBending) follows the same principle but fuses what it lifts
-// into one solid rock.
+// B cycles the left mouse button through dig -> bend water -> bend earth -> bend
+// fire -> bend air -> dig. Water is below; earth (EarthBending) follows the same
+// principle but fuses what it lifts into one solid rock; fire (FireBending) is
+// conjured rather than lifted, since there is no fire lying around to take; air
+// (AirBending, last) holds and throws a swirling ball of wisps the same way, but
+// the wisps are pure force rather than matter — they push what they pass instead
+// of landing as a cell.
+//
+// Every element also has a Form (game.js, Q while bending opens the picker):
+// Bolt is everything described above; Orbit pins the same held matter to the
+// bender instead of the cursor and spins it in place for as long as the button
+// stays down, striking anything it swings past. See the "forms" section below.
 //
 // Water: while the button is held, water
 // near the cursor is lifted out of the grid a little at a time and gathers into a
@@ -69,10 +78,44 @@ function bendSelected(scene, element) {
     && !scene.player.dead && !scene.wheelOpen;
 }
 
+// ---------------------------------------------------------------------------
+// forms — Bolt (the default above) and Orbit, shared by every element
+// ---------------------------------------------------------------------------
+//
+// Bolt gathers matter at the cursor and throws it. Orbit gathers the same way
+// (grab()/steerHeld's substance half is untouched either way) but never chases
+// the cursor at all: what's held pins to the bender and spins for as long as
+// the button stays down, and it hits whatever it swings past — the one thing
+// Bolt form never could. Letting go scatters the ring outward instead of
+// throwing one mass in one direction. Modifiers aren't wired up yet; Form is
+// the first slice of giving bending the same wheel-driven depth spells have
+// (see game.js, openBendWheel).
+const ORBIT = {
+  RADIUS: 34,          // px the ring sits at around the bender
+  SPIN: 3.2,           // rad/s
+  RELEASE_KICK: 160,   // px/s outward speed given to each piece when the ring is let go
+  HIT_RADIUS: 10,      // px around an orbiting piece that can strike a body
+  HIT_COOLDOWN: 0.35,  // s before the same piece can strike again
+};
+
+// Shoves anything caught within ORBIT.HIT_RADIUS of (x, y) — the ring's own
+// strike. Modest and knockback-only by design, not a new damage system.
+// Returns whether it hit anything, so callers can throttle per piece.
+function orbitStrike(scene, x, y, strength) {
+  const hits = scene.bodiesInRadius(x, y, ORBIT.HIT_RADIUS);
+  let hit = false;
+  for (const t of hits) {
+    if (!t.self) hit = true;
+  }
+  if (hit) scene.knockback(x, y, ORBIT.HIT_RADIUS * 2.4, strength);
+  return hit;
+}
+
 class WaterBending {
   constructor(scene) {
     this.scene = scene;
     this.element = 'Water';
+    this.form = 'Bolt'; // 'Bolt' | 'Orbit' — set by game.js's bend-form wheel
     this.grabRadius = BEND.GRAB_RADIUS;
     this.held = [];    // drops following the cursor: { x, y, vx, vy }
     this.free = [];    // released drops, falling until they land: { x, y, vx, vy, age }
@@ -88,12 +131,22 @@ class WaterBending {
     this.grabAcc = 0;
   }
 
-  // Let go of everything held. Drops keep their velocity, which is the throw.
+  // Let go of everything held. Bolt's drops keep their velocity, which is the
+  // throw; Orbit's have almost none, so they get an outward kick instead —
+  // letting go of a ring reads as releasing it, not an arbitrary scatter.
   release() {
     if (!this.active && !this.held.length) return;
     this.active = false;
+    const p = this.scene.player;
+    const cx = p.x + p.w / 2, cy = p.y + p.h / 2;
     for (const d of this.held) {
       d.age = 0;
+      if (this.form === 'Orbit') {
+        const dx = d.x - cx, dy = d.y - cy;
+        const dist = Math.max(1, Math.hypot(dx, dy));
+        d.vx += (dx / dist) * ORBIT.RELEASE_KICK;
+        d.vy += (dy / dist) * ORBIT.RELEASE_KICK;
+      }
       this.free.push(d);
     }
     this.held.length = 0;
@@ -113,7 +166,9 @@ class WaterBending {
     if (this.active && !bendSelected(this.scene, this.element)) this.release();
 
     if (this.active) this.grab(dt);
-    if (this.held.length) this.steerHeld(dt);
+    if (this.held.length) {
+      if (this.form === 'Orbit') this.steerOrbit(dt); else this.steerHeld(dt);
+    }
     if (this.free.length) this.updateFree(dt);
   }
 
@@ -165,6 +220,32 @@ class WaterBending {
       d.vx += (wx - d.vx) * turn;
       d.vy += (wy - d.vy) * turn;
       if (this.moveDrop(d, dt) === 'consumed') this.held.splice(i, 1);
+    }
+  }
+
+  // Orbit form: instead of chasing the cursor, each drop takes a fixed slot on
+  // a ring around the bender that spins for as long as the button is held.
+  // Anything the ring swings close to gets a shove — the substance hooks
+  // (moveDrop, dousing/cooling) are exactly the same ones Bolt form uses.
+  steerOrbit(dt) {
+    const s = this.scene;
+    const p = s.player;
+    const cx = p.x + p.w / 2, cy = p.y + p.h / 2;
+    this.spin = (this.spin || 0) + ORBIT.SPIN * dt;
+    const n = this.held.length;
+    const turn = Math.min(1, BEND.RESPONSE * dt);
+    for (let i = n - 1; i >= 0; i--) {
+      const d = this.held[i];
+      const a = (i / n) * Math.PI * 2 + this.spin;
+      const tx = cx + Math.cos(a) * ORBIT.RADIUS, ty = cy + Math.sin(a) * ORBIT.RADIUS;
+      let wx = (tx - d.x) * BEND.FOLLOW, wy = (ty - d.y) * BEND.FOLLOW;
+      const w = Math.hypot(wx, wy);
+      if (w > BEND.MAX_SPEED) { wx *= BEND.MAX_SPEED / w; wy *= BEND.MAX_SPEED / w; }
+      d.vx += (wx - d.vx) * turn;
+      d.vy += (wy - d.vy) * turn;
+      if (this.moveDrop(d, dt) === 'consumed') { this.held.splice(i, 1); continue; }
+      d.hitCd = (d.hitCd || 0) - dt;
+      if (d.hitCd <= 0 && orbitStrike(s, d.x, d.y, 140)) d.hitCd = ORBIT.HIT_COOLDOWN;
     }
   }
 
@@ -297,6 +378,7 @@ class EarthBending {
     const M = PixelWorld.MAT;
     this.scene = scene;
     this.element = 'Earth';
+    this.form = 'Bolt'; // 'Bolt' | 'Orbit' — set by game.js's bend-form wheel
     this.grabRadius = EARTH_BEND.GRAB_RADIUS;
     // What counts as earth. Hard rock takes twice the effort to pry loose.
     this.loose = new Set([M.SAND, M.DIRT, M.GRASS]);
@@ -328,12 +410,27 @@ class EarthBending {
     this.rock = { x: t.x, y: t.y, vx: 0, vy: 0, cells: [], nextSlot: 0 };
   }
 
+  // Bolt lets go of one flying boulder (thrown). Orbit has no boulder to throw
+  // — letting go scatters the ring's own stones outward, each one landing
+  // where it falls rather than flying on together.
   release() {
     if (!this.active && !this.rock) return;
     this.active = false;
     if (this.rock && this.rock.cells.length) {
-      this.rock.age = 0;
-      this.thrown.push(this.rock);
+      if (this.form === 'Orbit') {
+        const M = PixelWorld.MAT;
+        for (const c of this.rock.cells) {
+          const d = Math.max(1, Math.hypot(c.ox, c.oy));
+          this.loosePieces.push({
+            x: this.rock.x + c.ox * PIXEL, y: this.rock.y + c.oy * PIXEL,
+            vx: (c.ox / d) * ORBIT.RELEASE_KICK, vy: (c.oy / d) * ORBIT.RELEASE_KICK,
+            mat: M.STONE, variant: c.shade, age: 0,
+          });
+        }
+      } else {
+        this.rock.age = 0;
+        this.thrown.push(this.rock);
+      }
     }
     for (const pc of this.pieces) {
       this.loosePieces.push({ x: pc.x, y: pc.y, vx: 0, vy: 0, mat: pc.mat, variant: pc.variant, age: 0 });
@@ -347,7 +444,7 @@ class EarthBending {
     if (this.active) this.grab(dt);
     if (this.rock) {
       this.flyPieces(dt);
-      this.steerRock(dt);
+      if (this.form === 'Orbit') this.steerOrbitRock(dt); else this.steerRock(dt);
     }
     if (this.thrown.length) this.updateThrown(dt);
     if (this.loosePieces.length) this.updateLoose(dt);
@@ -431,6 +528,32 @@ class EarthBending {
     // A held rock is dug out of the ground it sits in, and it is exactly the shape of
     // its own hole, so it has to be allowed to scrape — see rockCollides.
     this.moveRock(rock, dt, 'held');
+  }
+
+  // Orbit form: the rock never chases the cursor at all. It pins to the
+  // bender and its cells rotate in place around that centre — a spinning
+  // clump rather than a followed boulder — striking anything it swings past.
+  // (Cells clipping slightly into terrain while spinning is an accepted
+  // cosmetic quirk here, the same tolerance a held Bolt rock already has.)
+  steerOrbitRock(dt) {
+    const rock = this.rock;
+    const p = this.scene.player;
+    rock.x = p.x + p.w / 2;
+    rock.y = p.y + p.h / 2;
+    rock.vx = 0;
+    rock.vy = 0;
+    const dtheta = ORBIT.SPIN * dt;
+    const cos = Math.cos(dtheta), sin = Math.sin(dtheta);
+    for (const c of rock.cells) {
+      const nx = c.ox * cos - c.oy * sin;
+      const ny = c.ox * sin + c.oy * cos;
+      c.ox = nx; c.oy = ny;
+      c.hitCd = (c.hitCd || 0) - dt;
+      if (c.hitCd <= 0) {
+        const px = rock.x + c.ox * PIXEL, py = rock.y + c.oy * PIXEL;
+        if (orbitStrike(this.scene, px, py, 220)) c.hitCd = ORBIT.HIT_COOLDOWN;
+      }
+    }
   }
 
   updateThrown(dt) {
@@ -596,6 +719,616 @@ class EarthBending {
         const pal = PALETTE[pc.mat];
         g.fillStyle(color(pal[(pc.variant || 0) % pal.length]), 1);
         g.fillRect(pc.x - PIXEL / 2, pc.y - PIXEL / 2, PIXEL, PIXEL);
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// fire
+// ---------------------------------------------------------------------------
+//
+// Water is lifted and earth is torn loose, but there is no fire lying in the
+// grid to take — fire is the one element a bender creates instead of moves.
+// Holding the button kindles embers out of thin air at the cursor. They swirl
+// into a blob the same way held water does, but a kindled ember is burning on
+// borrowed time: left held too long, it simply burns itself out and is gone,
+// so a fire bender can't bank an endless stockpile the way water and earth can.
+//
+// Let go and the embers fly on their momentum, exactly like a thrown drop of
+// water. One that touches something flammable sets it alight on contact and is
+// spent doing it, one that touches water is snuffed out, and one that lands
+// anywhere else simply becomes an ordinary fire cell and burns down the way any
+// other fire does (world.js, updateFire) — a small ember, so it gets less life
+// than a stoked blaze.
+
+const FIRE_BEND = {
+  GRAB_RADIUS: 6,        // cells around the cursor new embers are kindled in
+  CONJURE_RATE: 90,      // embers created per second while the button is held
+  CAPACITY: 120,         // embers held at once — less than water or earth, since
+                          // this mass is free and needs some cap of its own
+  REACH: 95,             // cells from the bender embers may be kindled or held at
+  FOLLOW: 8,             // how hard an ember is pulled toward its place in the blob
+  RESPONSE: 10,          // how quickly an ember's velocity turns toward that pull
+  MAX_SPEED: 560,        // px/s
+  SPACING: 0.6,          // blob packing, as water
+  SWIRL: 1.4,            // rad/s — embers churn faster than water; fire doesn't sit still
+  GRAVITY: 480,          // px/s² on released embers — lighter than water or stone
+  SETTLE_RADIUS: 6,      // how far a landing ember looks for an open cell
+  FREE_LIFE: 3,          // seconds a thrown ember may fly before it burns out unlanded
+  HOLD_LIFE: 6,          // seconds a kindled ember may be held before it burns out
+  EMBER_LIFE_FRAC: 0.5,  // an ember that lands with no fuel gets this fraction of FIRE_LIFE
+};
+
+class FireBending {
+  constructor(scene) {
+    this.scene = scene;
+    this.element = 'Fire';
+    this.form = 'Bolt'; // 'Bolt' | 'Orbit' — set by game.js's bend-form wheel
+    this.grabRadius = FIRE_BEND.GRAB_RADIUS;
+    this.held = [];    // embers following the cursor: { x, y, vx, vy, life }
+    this.free = [];    // released embers, flying until they land or burn out: { x, y, vx, vy, age }
+    this.active = false;
+    this.grabAcc = 0;
+    this.grabOffsets = bendDiscOffsets(FIRE_BEND.GRAB_RADIUS);
+    this.settleOffsets = bendDiscOffsets(FIRE_BEND.SETTLE_RADIUS);
+    this.gfx = scene.add.graphics().setDepth(8.5);
+  }
+
+  begin() {
+    this.active = true;
+    this.grabAcc = 0;
+  }
+
+  // Let go of everything held. Bolt's embers keep their velocity, which is the
+  // throw; Orbit's get an outward kick instead, so letting go of a ring reads
+  // as releasing it rather than an arbitrary scatter.
+  release() {
+    if (!this.active && !this.held.length) return;
+    this.active = false;
+    const p = this.scene.player;
+    const cx = p.x + p.w / 2, cy = p.y + p.h / 2;
+    for (const d of this.held) {
+      d.age = 0;
+      if (this.form === 'Orbit') {
+        const dx = d.x - cx, dy = d.y - cy;
+        const dist = Math.max(1, Math.hypot(dx, dy));
+        d.vx += (dx / dist) * ORBIT.RELEASE_KICK;
+        d.vy += (dy / dist) * ORBIT.RELEASE_KICK;
+      }
+      this.free.push(d);
+    }
+    this.held.length = 0;
+  }
+
+  get holding() {
+    return this.held.length;
+  }
+
+  target() {
+    return bendTarget(this.scene, FIRE_BEND.REACH);
+  }
+
+  update(dt) {
+    // Anything that takes the left button away from fire bending lets the embers
+    // go: dying, opening the spell wheel, switching to another mode or element.
+    if (this.active && !bendSelected(this.scene, this.element)) this.release();
+
+    if (this.active) this.grab(dt);
+    if (this.held.length) {
+      if (this.form === 'Orbit') this.steerOrbit(dt); else this.steerHeld(dt);
+    }
+    if (this.free.length) this.updateFree(dt);
+  }
+
+  // Kindle new embers near the cursor, nearest first, up to the rate and the
+  // capacity. Nothing is removed from the world — this is the one bend that
+  // creates instead of drawing on what's already there.
+  grab(dt) {
+    if (this.held.length >= FIRE_BEND.CAPACITY) { this.grabAcc = 0; return; }
+    const s = this.scene;
+    this.grabAcc += FIRE_BEND.CONJURE_RATE * dt;
+    let n = Math.floor(this.grabAcc);
+    if (n <= 0) return;
+    this.grabAcc -= n;
+
+    const p = s.player;
+    const pgx = (p.x + p.w / 2) / PIXEL, pgy = (p.y + p.h / 2) / PIXEL;
+    const pointer = s.input.activePointer;
+    const cgx = Math.floor(pointer.worldX / PIXEL), cgy = Math.floor(pointer.worldY / PIXEL);
+    for (const [dx, dy] of this.grabOffsets) {
+      if (n <= 0 || this.held.length >= FIRE_BEND.CAPACITY) break;
+      const x = cgx + dx, y = cgy + dy;
+      if (x <= 0 || x >= COLS - 1 || y <= 0 || y >= ROWS - 1) continue;
+      if (Math.hypot(x - pgx, y - pgy) > FIRE_BEND.REACH) continue;
+      this.held.push({
+        x: x * PIXEL + PIXEL / 2, y: y * PIXEL + PIXEL / 2, vx: 0, vy: 0,
+        life: FIRE_BEND.HOLD_LIFE,
+      });
+      n--;
+    }
+    this.grabAcc = Math.min(this.grabAcc, 1);
+  }
+
+  // Each ember chases its own place in the blob, exactly as held water does, and
+  // burns down while it's held — an ember whose life runs out just goes out.
+  steerHeld(dt) {
+    const { x: cx, y: cy } = this.target();
+    const spin = (this.scene.time.now / 1000) * FIRE_BEND.SWIRL;
+    const turn = Math.min(1, FIRE_BEND.RESPONSE * dt);
+    for (let i = this.held.length - 1; i >= 0; i--) {
+      const d = this.held[i];
+      d.life -= dt;
+      if (d.life <= 0) { this.held.splice(i, 1); continue; }
+      const r = FIRE_BEND.SPACING * PIXEL * Math.sqrt(i + 0.5);
+      const a = i * BEND_GOLDEN + spin;
+      const tx = cx + Math.cos(a) * r, ty = cy + Math.sin(a) * r;
+      let wx = (tx - d.x) * FIRE_BEND.FOLLOW, wy = (ty - d.y) * FIRE_BEND.FOLLOW;
+      const w = Math.hypot(wx, wy);
+      if (w > FIRE_BEND.MAX_SPEED) { wx *= FIRE_BEND.MAX_SPEED / w; wy *= FIRE_BEND.MAX_SPEED / w; }
+      d.vx += (wx - d.vx) * turn;
+      d.vy += (wy - d.vy) * turn;
+      if (this.moveDrop(d, dt) === 'consumed') this.held.splice(i, 1);
+    }
+  }
+
+  // Orbit form: instead of chasing the cursor, each ember takes a fixed slot
+  // on a ring around the bender that spins for as long as the button is held,
+  // igniting or striking anything it swings close to.
+  steerOrbit(dt) {
+    const s = this.scene;
+    const p = s.player;
+    const cx = p.x + p.w / 2, cy = p.y + p.h / 2;
+    this.spin = (this.spin || 0) + ORBIT.SPIN * dt;
+    const n = this.held.length;
+    const turn = Math.min(1, FIRE_BEND.RESPONSE * dt);
+    for (let i = n - 1; i >= 0; i--) {
+      const d = this.held[i];
+      d.life -= dt;
+      if (d.life <= 0) { this.held.splice(i, 1); continue; }
+      const a = (i / n) * Math.PI * 2 + this.spin;
+      const tx = cx + Math.cos(a) * ORBIT.RADIUS, ty = cy + Math.sin(a) * ORBIT.RADIUS;
+      let wx = (tx - d.x) * FIRE_BEND.FOLLOW, wy = (ty - d.y) * FIRE_BEND.FOLLOW;
+      const w = Math.hypot(wx, wy);
+      if (w > FIRE_BEND.MAX_SPEED) { wx *= FIRE_BEND.MAX_SPEED / w; wy *= FIRE_BEND.MAX_SPEED / w; }
+      d.vx += (wx - d.vx) * turn;
+      d.vy += (wy - d.vy) * turn;
+      if (this.moveDrop(d, dt) === 'consumed') { this.held.splice(i, 1); continue; }
+      d.hitCd = (d.hitCd || 0) - dt;
+      if (d.hitCd <= 0 && orbitStrike(s, d.x, d.y, 150)) d.hitCd = ORBIT.HIT_COOLDOWN;
+    }
+  }
+
+  updateFree(dt) {
+    for (let i = this.free.length - 1; i >= 0; i--) {
+      const d = this.free[i];
+      d.age += dt;
+      d.vy += FIRE_BEND.GRAVITY * dt;
+      d.vx *= 1 - Math.min(1, 0.3 * dt);
+      const res = this.moveDrop(d, dt);
+      if (res === 'consumed') { this.free.splice(i, 1); continue; }
+      if (res === 'blocked' || d.age > FIRE_BEND.FREE_LIFE) {
+        this.settle(d);
+        this.free.splice(i, 1);
+      }
+    }
+  }
+
+  // Moves one ember by its velocity in sub-steps of at most one cell, blocked per
+  // axis like a water drop. An ember that touches water is snuffed, and one that
+  // touches — or bumps into — anything flammable sets it alight and is spent
+  // doing it. Returns 'ok', 'blocked' or 'consumed'.
+  moveDrop(d, dt) {
+    const s = this.scene;
+    const dist = Math.max(Math.abs(d.vx), Math.abs(d.vy)) * dt;
+    const steps = Math.max(1, Math.ceil(dist / PIXEL));
+    const sx = (d.vx * dt) / steps, sy = (d.vy * dt) / steps;
+    let blocked = false;
+    for (let k = 0; k < steps; k++) {
+      if (this.solidAt(d.x + sx, d.y)) {
+        if (this.igniteCell(Math.floor((d.x + sx) / PIXEL), Math.floor(d.y / PIXEL))) return 'consumed';
+        blocked = true;
+      } else d.x += sx;
+      if (this.solidAt(d.x, d.y + sy)) {
+        if (this.igniteCell(Math.floor(d.x / PIXEL), Math.floor((d.y + sy) / PIXEL))) return 'consumed';
+        blocked = true;
+      } else d.y += sy;
+      const gx = Math.floor(d.x / PIXEL), gy = Math.floor(d.y / PIXEL);
+      const id = s.idx(gx, gy);
+      if (s.grid[id] === WATER) return 'consumed';
+      if (this.igniteCell(gx, gy)) return 'consumed';
+      if (blocked) break;
+    }
+    return blocked ? 'blocked' : 'ok';
+  }
+
+  // Direct contact always lights fuel — no roll, unlike the slower chance fire
+  // has to catch a neighbour it's spreading to on its own (world.js, ignite).
+  // Grass burns down to dirt with a flame standing over it, the same as ambient
+  // fire; anything else flammable simply becomes fire.
+  igniteCell(gx, gy) {
+    if (gx <= 0 || gx >= COLS - 1 || gy <= 0 || gy >= ROWS - 1) return false;
+    const s = this.scene;
+    const M = PixelWorld.MAT;
+    const id = s.idx(gx, gy);
+    const m = s.grid[id];
+    if (m === M.GRASS) {
+      s.setCell(id, M.DIRT, 1);
+      const up = id - COLS;
+      if (up >= 0 && s.grid[up] === M.EMPTY) s.setCell(up, M.FIRE, PixelWorld.FIRE_LIFE);
+      return true;
+    }
+    if (PixelWorld.FLAMMABILITY[m] > 0) {
+      s.setCell(id, M.FIRE, Math.min(255, PixelWorld.BURN_LIFE[m]));
+      return true;
+    }
+    return false;
+  }
+
+  solidAt(px, py) {
+    const gx = Math.floor(px / PIXEL), gy = Math.floor(py / PIXEL);
+    if (gx <= 0 || gx >= COLS - 1 || gy <= 0 || gy >= ROWS - 1) return true;
+    return IS_SOLID[this.scene.grid[this.scene.idx(gx, gy)]] === 1;
+  }
+
+  // A landed ember that found no fuel becomes an ordinary fire cell in the
+  // nearest open spot, and burns down exactly like any other. Wedged into a
+  // sealed crevice with nowhere to go, it is simply lost — the same rare leak
+  // water's settle has.
+  settle(d) {
+    const s = this.scene;
+    const M = PixelWorld.MAT;
+    const gx = Math.floor(d.x / PIXEL), gy = Math.floor(d.y / PIXEL);
+    for (const [dx, dy] of this.settleOffsets) {
+      const x = gx + dx, y = gy + dy;
+      if (x <= 0 || x >= COLS - 1 || y <= 0 || y >= ROWS - 1) continue;
+      const id = s.idx(x, y);
+      if (s.grid[id] === M.EMPTY) {
+        s.setCell(id, M.FIRE, Math.round(PixelWorld.FIRE_LIFE * FIRE_BEND.EMBER_LIFE_FRAC));
+        return;
+      }
+    }
+  }
+
+  draw() {
+    const g = this.gfx;
+    g.clear();
+    if (!this.held.length && !this.free.length) return;
+    const pal = FX_PALETTE.Fire;
+    // A faint hot halo around the held blob, so a fire bender's swirl reads as
+    // heat, not as a fistful of floating embers.
+    if (this.held.length > 4) {
+      let sx = 0, sy = 0;
+      for (const d of this.held) { sx += d.x; sy += d.y; }
+      const r = FIRE_BEND.SPACING * PIXEL * Math.sqrt(this.held.length) + 6;
+      g.fillStyle(pal.glow, 0.14);
+      g.fillCircle(sx / this.held.length, sy / this.held.length, r);
+    }
+    for (const list of [this.held, this.free]) {
+      for (const d of list) {
+        const speed = Math.abs(d.vx) + Math.abs(d.vy);
+        g.fillStyle(speed > 320 ? pal.core : pal.glow, 1);
+        // A hair larger than a cell, so embers at fractional positions do not
+        // leave seams between them.
+        g.fillRect(d.x - PIXEL / 2 - 0.5, d.y - PIXEL / 2 - 0.5, PIXEL + 1, PIXEL + 1);
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// air
+// ---------------------------------------------------------------------------
+//
+// Air has nothing in the grid to lift and nothing to conjure as a substance,
+// but it holds and throws exactly the same way water and fire do: holding the
+// button gathers a swirling ball of wind at the cursor, made of the same kind
+// of drifting wisps as Fire's embers, and it follows your hand — not rigidly,
+// the same lag and catch-up as every other held blob here. Sweep and let go
+// and the wisps keep whatever motion they had, so throwing a gust is a flick
+// of the mouse, not a fixed-size explosion at a fixed range.
+//
+// A held or flying wisp-ball pushes everything near it — enemies, debris,
+// projectiles — every frame it exists, and it carries smoke, gas and flame
+// along with it, the one way a gust touches the grid. The push comes from the
+// whole cluster's centre and size, not from each wisp separately, so a tight
+// ball of ninety wisps doesn't hit ninety times harder than a loose one.
+// Nothing about it draws, moves or creates a cell beyond that drift, and it
+// never pushes the bender themselves, same as water and earth. A wisp is
+// never matter, so it never lands as anything — held too long or flown too
+// far, it simply dissipates.
+
+const AIR_BEND = {
+  GRAB_RADIUS: 6,        // cells around the cursor new wisps gather in
+  CONJURE_RATE: 110,     // wisps drawn out of the air per second while held
+  CAPACITY: 90,          // wisps held at once
+  REACH: 100,            // cells from the bender a wisp may be held at
+  FOLLOW: 9,             // how hard a wisp is pulled toward its place in the ball
+  RESPONSE: 12,          // how quickly a wisp's velocity turns toward that pull — air answers fastest of the four
+  MAX_SPEED: 640,        // px/s
+  SPACING: 0.55,         // ball packing, as the other three
+  SWIRL: 1.8,            // rad/s — the fastest churn of any held blob
+  LOFT: 60,              // px/s² upward drift on a thrown wisp: air floats, it doesn't fall
+  DRAG: 0.4,             // 1/s velocity bleed on a thrown wisp
+  FREE_LIFE: 2.2,        // seconds a thrown gust may travel before it dissipates
+  HOLD_LIFE: 5,          // seconds a held wisp may be sustained before it dissipates
+  HOLD_ACCEL: 900,       // px/s² the held ball pushes with, scaled by dt
+  THROW_ACCEL: 1500,     // px/s² a moving gust pushes with — a current hits harder than a held breeze
+  PUSH_PAD: 26,          // px added to the ball's own radius when it pushes
+  GAS_CHANCE: 0.5,       // per-cell chance a caught puff of smoke/gas/fire drifts this tick
+  GAS_BUDGET: 40,        // cells checked per push, so a big ball stays cheap
+};
+
+class AirBending {
+  constructor(scene) {
+    this.scene = scene;
+    this.element = 'Air';
+    this.form = 'Bolt'; // 'Bolt' | 'Orbit' — set by game.js's bend-form wheel
+    this.grabRadius = AIR_BEND.GRAB_RADIUS;
+    this.held = [];    // wisps following the cursor: { x, y, vx, vy, life }
+    this.free = [];    // released wisps, flying until they dissipate: { x, y, vx, vy, age }
+    this.active = false;
+    this.grabAcc = 0;
+    this.grabOffsets = bendDiscOffsets(AIR_BEND.GRAB_RADIUS);
+    this.gfx = scene.add.graphics().setDepth(8.5);
+  }
+
+  begin() {
+    this.active = true;
+    this.grabAcc = 0;
+  }
+
+  // Let go of everything held. Bolt's wisps keep their velocity, which is the
+  // throw; Orbit's get an outward kick instead, so letting go of a ring reads
+  // as releasing it rather than an arbitrary scatter.
+  release() {
+    if (!this.active && !this.held.length) return;
+    this.active = false;
+    const p = this.scene.player;
+    const cx = p.x + p.w / 2, cy = p.y + p.h / 2;
+    for (const d of this.held) {
+      d.age = 0;
+      if (this.form === 'Orbit') {
+        const dx = d.x - cx, dy = d.y - cy;
+        const dist = Math.max(1, Math.hypot(dx, dy));
+        d.vx += (dx / dist) * ORBIT.RELEASE_KICK;
+        d.vy += (dy / dist) * ORBIT.RELEASE_KICK;
+      }
+      this.free.push(d);
+    }
+    this.held.length = 0;
+  }
+
+  get holding() {
+    return this.held.length;
+  }
+
+  target() {
+    return bendTarget(this.scene, AIR_BEND.REACH);
+  }
+
+  update(dt) {
+    // Anything that takes the left button away from air bending lets the ball
+    // go: dying, opening the spell wheel, switching to another mode or element.
+    if (this.active && !bendSelected(this.scene, this.element)) this.release();
+
+    if (this.active) this.grab(dt);
+    if (this.held.length) {
+      // Orbit's push is already free: groupPush hits everything near the held
+      // cluster every frame regardless of where that cluster is, so pinning it
+      // to a ring around the bender instead of the cursor is the only change
+      // Orbit form needs here.
+      if (this.form === 'Orbit') this.steerOrbit(dt); else this.steerHeld(dt);
+      this.groupPush(this.held, AIR_BEND.HOLD_ACCEL * dt);
+    }
+    if (this.free.length) { this.updateFree(dt); this.groupPush(this.free, AIR_BEND.THROW_ACCEL * dt); }
+  }
+
+  // Draw new wisps out of the air near the cursor, nearest first, up to the
+  // rate and the capacity. Nothing is taken from the world — there is no
+  // "air" cell to remove.
+  grab(dt) {
+    if (this.held.length >= AIR_BEND.CAPACITY) { this.grabAcc = 0; return; }
+    const s = this.scene;
+    this.grabAcc += AIR_BEND.CONJURE_RATE * dt;
+    let n = Math.floor(this.grabAcc);
+    if (n <= 0) return;
+    this.grabAcc -= n;
+
+    const p = s.player;
+    const pgx = (p.x + p.w / 2) / PIXEL, pgy = (p.y + p.h / 2) / PIXEL;
+    const pointer = s.input.activePointer;
+    const cgx = Math.floor(pointer.worldX / PIXEL), cgy = Math.floor(pointer.worldY / PIXEL);
+    for (const [dx, dy] of this.grabOffsets) {
+      if (n <= 0 || this.held.length >= AIR_BEND.CAPACITY) break;
+      const x = cgx + dx, y = cgy + dy;
+      if (x <= 0 || x >= COLS - 1 || y <= 0 || y >= ROWS - 1) continue;
+      if (Math.hypot(x - pgx, y - pgy) > AIR_BEND.REACH) continue;
+      this.held.push({
+        x: x * PIXEL + PIXEL / 2, y: y * PIXEL + PIXEL / 2, vx: 0, vy: 0,
+        life: AIR_BEND.HOLD_LIFE,
+      });
+      n--;
+    }
+    this.grabAcc = Math.min(this.grabAcc, 1);
+  }
+
+  // Each wisp chases its own place in the ball exactly as a held water drop
+  // does, and burns down while it's held — a wisp whose life runs out just
+  // dissipates on its own.
+  steerHeld(dt) {
+    const { x: cx, y: cy } = this.target();
+    const spin = (this.scene.time.now / 1000) * AIR_BEND.SWIRL;
+    const turn = Math.min(1, AIR_BEND.RESPONSE * dt);
+    for (let i = this.held.length - 1; i >= 0; i--) {
+      const d = this.held[i];
+      d.life -= dt;
+      if (d.life <= 0) { this.dissipate(d); this.held.splice(i, 1); continue; }
+      const r = AIR_BEND.SPACING * PIXEL * Math.sqrt(i + 0.5);
+      const a = i * BEND_GOLDEN + spin;
+      const tx = cx + Math.cos(a) * r, ty = cy + Math.sin(a) * r;
+      let wx = (tx - d.x) * AIR_BEND.FOLLOW, wy = (ty - d.y) * AIR_BEND.FOLLOW;
+      const w = Math.hypot(wx, wy);
+      if (w > AIR_BEND.MAX_SPEED) { wx *= AIR_BEND.MAX_SPEED / w; wy *= AIR_BEND.MAX_SPEED / w; }
+      d.vx += (wx - d.vx) * turn;
+      d.vy += (wy - d.vy) * turn;
+      if (this.moveDrop(d, dt) === 'blocked') { d.vx *= 0.5; d.vy *= 0.5; }
+    }
+  }
+
+  // Orbit form: instead of chasing the cursor, each wisp takes a fixed slot on
+  // a ring around the bender that spins for as long as the button is held.
+  // The push itself still comes from groupPush in update() — this only moves
+  // where the wisps sit.
+  steerOrbit(dt) {
+    const p = this.scene.player;
+    const cx = p.x + p.w / 2, cy = p.y + p.h / 2;
+    this.spin = (this.spin || 0) + ORBIT.SPIN * dt;
+    const n = this.held.length;
+    const turn = Math.min(1, AIR_BEND.RESPONSE * dt);
+    for (let i = n - 1; i >= 0; i--) {
+      const d = this.held[i];
+      d.life -= dt;
+      if (d.life <= 0) { this.dissipate(d); this.held.splice(i, 1); continue; }
+      const a = (i / n) * Math.PI * 2 + this.spin;
+      const tx = cx + Math.cos(a) * ORBIT.RADIUS, ty = cy + Math.sin(a) * ORBIT.RADIUS;
+      let wx = (tx - d.x) * AIR_BEND.FOLLOW, wy = (ty - d.y) * AIR_BEND.FOLLOW;
+      const w = Math.hypot(wx, wy);
+      if (w > AIR_BEND.MAX_SPEED) { wx *= AIR_BEND.MAX_SPEED / w; wy *= AIR_BEND.MAX_SPEED / w; }
+      d.vx += (wx - d.vx) * turn;
+      d.vy += (wy - d.vy) * turn;
+      if (this.moveDrop(d, dt) === 'blocked') { d.vx *= 0.5; d.vy *= 0.5; }
+    }
+  }
+
+  updateFree(dt) {
+    for (let i = this.free.length - 1; i >= 0; i--) {
+      const d = this.free[i];
+      d.age += dt;
+      d.vy -= AIR_BEND.LOFT * dt;
+      d.vx *= 1 - Math.min(1, AIR_BEND.DRAG * dt);
+      d.vy *= 1 - Math.min(1, AIR_BEND.DRAG * dt);
+      const res = this.moveDrop(d, dt);
+      if (res === 'blocked' || d.age > AIR_BEND.FREE_LIFE) {
+        this.dissipate(d);
+        this.free.splice(i, 1);
+      }
+    }
+  }
+
+  // Moves one wisp by its velocity in sub-steps of at most one cell, blocked
+  // per axis. A wisp is never matter, so nothing it touches consumes it —
+  // only a wall stops it. Returns 'ok' or 'blocked'.
+  moveDrop(d, dt) {
+    const dist = Math.max(Math.abs(d.vx), Math.abs(d.vy)) * dt;
+    const steps = Math.max(1, Math.ceil(dist / PIXEL));
+    const sx = (d.vx * dt) / steps, sy = (d.vy * dt) / steps;
+    let blocked = false;
+    for (let k = 0; k < steps; k++) {
+      if (this.solidAt(d.x + sx, d.y)) { d.vx *= -0.1; blocked = true; } else d.x += sx;
+      if (this.solidAt(d.x, d.y + sy)) { d.vy *= -0.1; blocked = true; } else d.y += sy;
+      if (blocked) break;
+    }
+    return blocked ? 'blocked' : 'ok';
+  }
+
+  solidAt(px, py) {
+    const gx = Math.floor(px / PIXEL), gy = Math.floor(py / PIXEL);
+    if (gx <= 0 || gx >= COLS - 1 || gy <= 0 || gy >= ROWS - 1) return true;
+    return IS_SOLID[this.scene.grid[this.scene.idx(gx, gy)]] === 1;
+  }
+
+  // A wisp is never matter, so there is nothing to place when it goes — just
+  // a small puff where it was.
+  dissipate(d) {
+    if (Math.random() < 0.4) this.scene.fx.burst(d.x, d.y, 2, 'Air', { speed: 30, life: 0.3, size: 1 });
+  }
+
+  // Pushes everything near a whole cluster of wisps at once, from the
+  // cluster's own centre and size, so the force doesn't stack once per wisp.
+  groupPush(list, strength) {
+    if (!list.length) return;
+    let sx = 0, sy = 0;
+    for (const d of list) { sx += d.x; sy += d.y; }
+    const cx = sx / list.length, cy = sy / list.length;
+    const radiusPx = AIR_BEND.SPACING * PIXEL * Math.sqrt(list.length) + AIR_BEND.PUSH_PAD;
+    this.gust(cx, cy, radiusPx, strength);
+  }
+
+  // Pushes everything within radiusPx of (cx, cy) away from that point,
+  // harder the closer it is. The caster is deliberately not on this list.
+  gust(cx, cy, radiusPx, strength) {
+    const s = this.scene;
+    const push = (ox, oy, obj) => {
+      const dx = ox - cx, dy = oy - cy;
+      const d = Math.max(1, Math.hypot(dx, dy));
+      if (d >= radiusPx) return;
+      const mag = strength * (1 - d / radiusPx);
+      obj.vx += (dx / d) * mag;
+      obj.vy += (dy / d) * mag;
+    };
+    for (const e of s.enemies.list) push(e.x + e.w / 2, e.y + e.h / 2, e);
+    for (const d of s.debris) push(d.x, d.y, d);
+    for (const pr of s.projectiles) push(pr.x, pr.y, pr);
+    this.blowGas(cx, cy, radiusPx);
+  }
+
+  // The one way a gust touches the grid: any smoke, gas or fire cell in range
+  // may drift one cell further from (cx, cy), same idea as everything else the
+  // gust pushes. Bounded per call so a wide gust can't become an unbounded
+  // scan every frame.
+  blowGas(cx, cy, radiusPx) {
+    const s = this.scene;
+    const gx0 = Math.max(1, Math.floor((cx - radiusPx) / PIXEL));
+    const gx1 = Math.min(COLS - 2, Math.floor((cx + radiusPx) / PIXEL));
+    const gy0 = Math.max(1, Math.floor((cy - radiusPx) / PIXEL));
+    const gy1 = Math.min(ROWS - 2, Math.floor((cy + radiusPx) / PIXEL));
+    let budget = AIR_BEND.GAS_BUDGET;
+    for (let y = gy0; y <= gy1 && budget > 0; y++) {
+      for (let x = gx0; x <= gx1 && budget > 0; x++) {
+        const id = s.idx(x, y);
+        const m = s.grid[id];
+        if (m !== SMOKE && m !== GAS && m !== FIRE) continue;
+        const wx = x * PIXEL + PIXEL / 2, wy = y * PIXEL + PIXEL / 2;
+        const dx = wx - cx, dy = wy - cy;
+        const d = Math.hypot(dx, dy);
+        if (d >= radiusPx) continue;
+        budget--;
+        if (Math.random() > AIR_BEND.GAS_CHANCE) continue;
+        const ux = d > 0.01 ? dx / d : 0, uy = d > 0.01 ? dy / d : -1;
+        const nx = x + Math.round(ux), ny = y + Math.round(uy);
+        if (nx === x && ny === y) continue;
+        if (nx <= 0 || nx >= COLS - 1 || ny <= 0 || ny >= ROWS - 1) continue;
+        const nid = s.idx(nx, ny);
+        if (s.grid[nid] !== EMPTY) continue;
+        const life = s.life[id];
+        s.setCell(nid, m, life);
+        s.setCell(id, EMPTY);
+      }
+    }
+  }
+
+  draw() {
+    const g = this.gfx;
+    g.clear();
+    if (!this.held.length && !this.free.length) return;
+    const pal = FX_PALETTE.Air;
+    // A faint halo around the held ball, so a swirl of wisps reads as one
+    // held mass rather than a scatter of loose motes.
+    if (this.held.length > 4) {
+      let sx = 0, sy = 0;
+      for (const d of this.held) { sx += d.x; sy += d.y; }
+      const r = AIR_BEND.SPACING * PIXEL * Math.sqrt(this.held.length) + 6;
+      g.fillStyle(pal.glow, 0.12);
+      g.fillCircle(sx / this.held.length, sy / this.held.length, r);
+    }
+    for (const list of [this.held, this.free]) {
+      for (const d of list) {
+        const speed = Math.abs(d.vx) + Math.abs(d.vy);
+        g.fillStyle(speed > 320 ? pal.core : pal.glow, speed > 320 ? 1 : 0.85);
+        // A hair larger than a cell, so wisps at fractional positions do not
+        // leave seams between them.
+        g.fillRect(d.x - PIXEL / 2 - 0.5, d.y - PIXEL / 2 - 0.5, PIXEL + 1, PIXEL + 1);
       }
     }
   }
