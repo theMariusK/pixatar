@@ -395,12 +395,20 @@ wss.on('connection', (ws) => {
       const targetId = room.players.has(String(msg.target || '')) ? String(msg.target) : null;
       if (targetId && targetId !== ws.playerId) {
         const victim = room.players.get(targetId);
+        const b = msg.bend && typeof msg.bend === 'object' ? msg.bend : null;
+        const bounded = (v, min, max) => Number.isFinite(+v) ? Math.min(max, Math.max(min, +v)) : 0;
         sendTo(victim.ws, {
           t: 'hit',
           from: ws.playerId,
           element: typeof msg.element === 'string' ? msg.element.slice(0, 12) : 'Arcane',
           amount: Math.min(Math.max(+msg.amount || 0, 0), 120),
           effects: Array.isArray(msg.effects) ? msg.effects.slice(0, 4) : null,
+          bend: b ? {
+            wetMs: bounded(b.wetMs, 0, 1000),
+            burnMs: bounded(b.burnMs, 0, 2500),
+            ix: bounded(b.ix, -240, 240),
+            iy: bounded(b.iy, -260, 260),
+          } : null,
         });
       }
     } else if (msg.t === 'blastImpulse') {

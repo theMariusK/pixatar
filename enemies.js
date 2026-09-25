@@ -162,17 +162,21 @@ class EnemySystem {
   // horizontal step that is cancelled if it would enter terrain, then a vertical one.
   moveBody(e, dt) {
     const s = this.scene;
-    e.vy += 500 * dt;
+    const wet = s.time.now < (e.wetUntil || 0);
+    e.vy += (wet ? 90 : 500) * dt;
+    if (wet) e.vy *= Math.exp(-3 * dt);
     if (e.vy > 420) e.vy = 420;
 
-    const nx = e.x + e.vx * dt;
+    const nx = e.x + (e.vx * (wet ? 0.65 : 1) + (e.impulseX || 0)) * dt;
     if (!s.rectSolid(nx, e.y, e.w, e.h)) {
       e.x = nx;
       e.blocked = false;
     } else {
       e.blocked = true;
       e.vx = 0;
+      e.impulseX = 0;
     }
+    e.impulseX = (e.impulseX || 0) * Math.exp(-3.2 * dt);
 
     const ny = e.y + e.vy * dt;
     if (!s.rectSolid(e.x, ny, e.w, e.h)) {
@@ -216,6 +220,13 @@ class EnemySystem {
       e.castFlash = Math.max(0, e.castFlash - dt);
       e.spawnGrace = Math.max(0, e.spawnGrace - dt);
       e.aggroBoost = Math.max(0, (e.aggroBoost || 0) - dt);
+      if (s.time.now < (e.wetUntil || 0)) e.burnUntil = 0;
+      if (s.time.now < (e.burnUntil || 0)) {
+        e.health -= 5 * dt;
+        if (Math.random() < dt * 15) s.fx.burst(e.x + Math.random() * e.w, e.y + 4,
+          2, 'Fire', { speed: 28, life: 0.35, rise: 62, size: 1.3 });
+        if (e.health <= 0) { this.kill(e); continue; }
+      }
       if (e.cooldown > 0) e.cooldown -= dt;
 
       const dx = pcx - (e.x + e.w / 2);

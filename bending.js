@@ -111,6 +111,36 @@ function orbitStrike(scene, x, y, strength) {
   return hit;
 }
 
+// Test the visible bent matter against body rectangles, rather than body centres.
+// A single body appears once even when a whole blob of particles overlaps it.
+function bendContacts(scene, points, pad = PIXEL) {
+  if (!points.length) return [];
+  const targets = [];
+  if (!scene.player.dead) targets.push({ self: true, body: scene.player });
+  for (const id in scene.remotePlayers) {
+    if (id === scene.netId) continue;
+    const p = scene.remotePlayers[id];
+    if (!p.dead) targets.push({ id, body: { x: p.x, y: p.y, w: PLAYER_BOX.w, h: PLAYER_BOX.h } });
+  }
+  for (const enemy of scene.enemies.list) {
+    if (!enemy.dead) targets.push({ enemy, body: enemy });
+  }
+  return targets.filter(({ body }) => points.some(({ x, y }) =>
+    x >= body.x - pad && x <= body.x + body.w + pad &&
+    y >= body.y - pad && y <= body.y + body.h + pad));
+}
+
+function bendHitReady(cooldowns, key, now, interval) {
+  if (cooldowns.size > 128) {
+    for (const [oldKey, until] of cooldowns) {
+      if (until <= now) cooldowns.delete(oldKey);
+    }
+  }
+  if ((cooldowns.get(key) || 0) > now) return false;
+  cooldowns.set(key, now + interval);
+  return true;
+}
+
 class WaterBending {
   constructor(scene) {
     this.scene = scene;
@@ -124,6 +154,7 @@ class WaterBending {
     this.grabOffsets = bendDiscOffsets(BEND.GRAB_RADIUS);
     this.settleOffsets = bendDiscOffsets(BEND.SETTLE_RADIUS);
     this.gfx = scene.add.graphics().setDepth(8.5);
+    this.hitCooldowns = new Map();
   }
 
   begin() {
@@ -170,6 +201,21 @@ class WaterBending {
       if (this.form === 'Orbit') this.steerOrbit(dt); else this.steerHeld(dt);
     }
     if (this.free.length) this.updateFree(dt);
+    this.touchBodies();
+  }
+
+  touchBodies() {
+    const s = this.scene;
+    const now = s.time.now;
+    for (const target of bendContacts(s, [...this.held, ...this.free])) {
+      const key = target.self ? 'self' : target.id || target.enemy;
+      if (!bendHitReady(this.hitCooldowns, key, now, 170)) continue;
+      if (target.self) s.receiveHit({ element: 'Water', amount: 0, bend: { wetMs: 450 } });
+      else if (target.enemy) target.enemy.wetUntil = now + 450;
+      else s.reportHit(target.id, 'Water', 0, null, { wetMs: 450 });
+      s.fx.burst(target.body.x + target.body.w / 2, target.body.y + target.body.h / 2,
+        3, 'Water', { speed: 35, life: 0.25, size: 1 });
+    }
   }
 
   // Lift water out of the grid near the cursor, nearest cells first, up to the rate
@@ -397,6 +443,7 @@ class EarthBending {
     this.grabOffsets = bendDiscOffsets(EARTH_BEND.GRAB_RADIUS);
     this.settleOffsets = bendDiscOffsets(4);
     this.gfx = scene.add.graphics().setDepth(8.5);
+    this.hitCooldowns = new Map();
   }
 
   get holding() {
@@ -448,6 +495,53 @@ class EarthBending {
     }
     if (this.thrown.length) this.updateThrown(dt);
     if (this.loosePieces.length) this.updateLoose(dt);
+  }
+
+  strikeBodies(rock, impactSpeed = Math.hypot(rock.vx, rock.vy)) {
+    if (!rock.cells.length) return;
+    const s = this.scene;
+    const now = s.time.now;
+    if (impactSpeed < 65 && this.form !== 'Orbit') return;
+    const points = rock.cells.map((c) => ({ x: rock.x + c.ox * PIXEL, y: rock.y + c.oy * PIXEL }));
+    const damage = Math.min(24, 4 + Math.sqrt(rock.cells.length) * 1.1 + impactSpeed * 0.018);
+    this.strikeObjects(rock, points, impactSpeed);
+    for (const target of bendContacts(s, points, PIXEL * 1.4)) {
+      const key = target.self ? 'self' : target.id || target.enemy;
+      if (!bendHitReady(this.hitCooldowns, key, now, 400)) continue;
+      const cx = target.body.x + target.body.w / 2;
+      const cy = target.body.y + target.body.h / 2;
+      const ix = Math.max(-240, Math.min(240, rock.vx * 0.65));
+      const iy = Math.max(-260, Math.min(120, rock.vy * 0.4 - 90));
+      if (target.self) {
+        s.receiveHit({ element: 'Earth', amount: damage, bend: { ix, iy } });
+      } else if (target.enemy) {
+        s.damageEnemy(target.enemy, damage, 'Earth');
+        target.enemy.impulseX = (target.enemy.impulseX || 0) + ix;
+        target.enemy.vy += iy;
+      } else {
+        s.reportHit(target.id, 'Earth', damage, null, { ix, iy });
+      }
+      s.fx.burst(cx, cy, 8, 'Earth', { speed: 90, life: 0.35, size: 1.4 });
+    }
+  }
+
+  strikeObjects(rock, points, speed) {
+    if (speed < 85) return;
+    const s = this.scene;
+    const M = PixelWorld.MAT;
+    for (let i = s.debris.length - 1; i >= 0; i--) {
+      const d = s.debris[i];
+      if (!points.some((p) => Math.hypot(p.x - d.x, p.y - d.y) < PIXEL * 2.5)) continue;
+      if (!bendHitReady(this.hitCooldowns, d, s.time.now, 180)) continue;
+      if (d.mat === M.GLASS || d.mat === M.LEAVES || d.mat === M.SNOW
+        || (rock.cells.length >= 6 && (d.mat === M.WOOD || d.mat === M.TIMBER))) {
+        s.debris.splice(i, 1);
+        s.fx.shards(d.x, d.y, 4, 'Earth');
+      } else {
+        d.vx += rock.vx * 0.5;
+        d.vy += rock.vy * 0.5 - 40;
+      }
+    }
   }
 
   // Pry earth loose near the cursor, nearest first. Never from directly under the
@@ -527,7 +621,9 @@ class EarthBending {
     rock.vy += (wy - rock.vy) * turn;
     // A held rock is dug out of the ground it sits in, and it is exactly the shape of
     // its own hole, so it has to be allowed to scrape — see rockCollides.
+    const impactSpeed = Math.hypot(rock.vx, rock.vy);
     this.moveRock(rock, dt, 'held');
+    this.strikeBodies(rock, impactSpeed);
   }
 
   // Orbit form: the rock never chases the cursor at all. It pins to the
@@ -554,6 +650,7 @@ class EarthBending {
         if (orbitStrike(this.scene, px, py, 220)) c.hitCd = ORBIT.HIT_COOLDOWN;
       }
     }
+    this.strikeBodies(rock);
   }
 
   updateThrown(dt) {
@@ -568,7 +665,9 @@ class EarthBending {
       rock.age += dt;
       rock.vy += EARTH_BEND.GRAVITY * dt;
       rock.vx *= 1 - Math.min(1, 0.3 * dt);
+      const impactSpeed = Math.hypot(rock.vx, rock.vy);
       const hit = this.moveRock(rock, dt, 'thrown');
+      this.strikeBodies(rock, impactSpeed);
       if (hit.down || rock.age > EARTH_BEND.FREE_LIFE) {
         this.stamp(rock);
         this.thrown.splice(i, 1);
@@ -614,15 +713,37 @@ class EarthBending {
       for (const c of rock.cells) {
         const px = rock.x + c.ox * PIXEL, py = rock.y + c.oy * PIXEL;
         if (this.solidAt(px, py)) before++;
-        if (this.solidAt(px + dx, py + dy)) after++;
+        if (this.solidAt(px + dx, py + dy)) {
+          const gx = Math.floor((px + dx) / PIXEL), gy = Math.floor((py + dy) / PIXEL);
+          if (!this.breakLightCell(gx, gy, rock)) after++;
+        }
       }
       return after > before && after > Math.max(1, rock.cells.length * 0.15);
     }
     for (const c of rock.cells) {
       const px = rock.x + c.ox * PIXEL, py = rock.y + c.oy * PIXEL;
-      if (this.solidAt(px + dx, py + dy) && !this.solidAt(px, py)) return true;
+      if (this.solidAt(px + dx, py + dy) && !this.solidAt(px, py)) {
+        const gx = Math.floor((px + dx) / PIXEL), gy = Math.floor((py + dy) / PIXEL);
+        if (this.breakLightCell(gx, gy, rock)) continue;
+        return true;
+      }
     }
     return false;
+  }
+
+  breakLightCell(gx, gy, rock) {
+    if (gx <= 0 || gx >= COLS - 1 || gy <= 0 || gy >= ROWS - 1) return false;
+    const s = this.scene;
+    const M = PixelWorld.MAT;
+    const id = s.idx(gx, gy);
+    const m = s.grid[id];
+    const speed = Math.hypot(rock.vx, rock.vy);
+    const fragile = m === M.GLASS || m === M.LEAVES || m === M.SNOW;
+    const timber = m === M.WOOD || m === M.TIMBER;
+    if (!((fragile && speed > 85) || (timber && speed > 180 && rock.cells.length >= 6))) return false;
+    s.setCell(id, EMPTY);
+    if (Math.random() < 0.18) s.fx.shards(gx * PIXEL, gy * PIXEL, 2, 'Earth');
+    return true;
   }
 
   solidAt(px, py) {
@@ -773,11 +894,15 @@ class FireBending {
     this.grabOffsets = bendDiscOffsets(FIRE_BEND.GRAB_RADIUS);
     this.settleOffsets = bendDiscOffsets(FIRE_BEND.SETTLE_RADIUS);
     this.gfx = scene.add.graphics().setDepth(8.5);
+    this.hitCooldowns = new Map();
+    this.casterFxAcc = 0;
   }
 
   begin() {
     this.active = true;
     this.grabAcc = 0;
+    this.casterFxAcc = 0;
+    this.scene.emitFireCasterParticles(10);
   }
 
   // Let go of everything held. Bolt's embers keep their velocity, which is the
@@ -815,10 +940,61 @@ class FireBending {
     if (this.active && !bendSelected(this.scene, this.element)) this.release();
 
     if (this.active) this.grab(dt);
+    if (this.active) {
+      this.casterFxAcc += dt * 18;
+      while (this.casterFxAcc >= 1) {
+        this.casterFxAcc--;
+        this.scene.emitFireCasterParticles(2);
+      }
+    }
     if (this.held.length) {
       if (this.form === 'Orbit') this.steerOrbit(dt); else this.steerHeld(dt);
     }
     if (this.free.length) this.updateFree(dt);
+    this.touchBodies();
+    this.touchObjects();
+  }
+
+  touchBodies() {
+    const s = this.scene;
+    const now = s.time.now;
+    for (const target of bendContacts(s, [...this.held, ...this.free])) {
+      const key = target.self ? 'self' : target.id || target.enemy;
+      if (!bendHitReady(this.hitCooldowns, key, now, 230)) continue;
+      if (target.self) {
+        s.receiveHit({ element: 'Fire', amount: 3, bend: { burnMs: 1200 } });
+      } else if (target.enemy) {
+        s.damageEnemy(target.enemy, 3, 'Fire');
+        target.enemy.burnUntil = now + 1200;
+      } else {
+        s.reportHit(target.id, 'Fire', 3, null, { burnMs: 1200 });
+      }
+      s.fx.burst(target.body.x + target.body.w / 2, target.body.y + 3,
+        5, 'Fire', { speed: 45, life: 0.4, rise: 55, size: 1.3 });
+    }
+  }
+
+  touchObjects() {
+    const s = this.scene;
+    for (let i = s.debris.length - 1; i >= 0; i--) {
+      const obj = s.debris[i];
+      if (!PixelWorld.FLAMMABILITY[obj.mat]) continue;
+      let ember = null;
+      let list = null;
+      for (const particles of [this.held, this.free]) {
+        const found = particles.findIndex((d) => Math.hypot(d.x - obj.x, d.y - obj.y) < PIXEL * 2);
+        if (found >= 0) { ember = found; list = particles; break; }
+      }
+      if (!list) continue;
+      list.splice(ember, 1);
+      s.debris.splice(i, 1);
+      const gx = Math.floor(obj.x / PIXEL), gy = Math.floor(obj.y / PIXEL);
+      if (gx > 0 && gx < COLS - 1 && gy > 0 && gy < ROWS - 1) {
+        const id = s.idx(gx, gy);
+        if (s.grid[id] === EMPTY) s.setCell(id, FIRE, Math.min(255, PixelWorld.BURN_LIFE[obj.mat]));
+      }
+      s.fx.burst(obj.x, obj.y, 6, 'Fire', { speed: 60, life: 0.4, rise: 40 });
+    }
   }
 
   // Kindle new embers near the cursor, nearest first, up to the rate and the
@@ -1033,8 +1209,8 @@ class FireBending {
 // along with it, the one way a gust touches the grid. The push comes from the
 // whole cluster's centre and size, not from each wisp separately, so a tight
 // ball of ninety wisps doesn't hit ninety times harder than a loose one.
-// Nothing about it draws, moves or creates a cell beyond that drift, and it
-// never pushes the bender themselves, same as water and earth. A wisp is
+// The bender is pushed too when they stand in their own gust. Nothing about it
+// draws, moves or creates a cell beyond that drift. A wisp is
 // never matter, so it never lands as anything — held too long or flown too
 // far, it simply dissipates.
 
@@ -1255,8 +1431,7 @@ class AirBending {
     this.gust(cx, cy, radiusPx, strength);
   }
 
-  // Pushes everything within radiusPx of (cx, cy) away from that point,
-  // harder the closer it is. The caster is deliberately not on this list.
+  // Pushes bodies and loose objects away from the gust, including the caster.
   gust(cx, cy, radiusPx, strength) {
     const s = this.scene;
     const push = (ox, oy, obj) => {
@@ -1265,11 +1440,39 @@ class AirBending {
       if (d >= radiusPx) return;
       const mag = strength * (1 - d / radiusPx);
       obj.vx += (dx / d) * mag;
-      obj.vy += (dy / d) * mag;
+      obj.vy += (dx === 0 && dy === 0 ? -1 : dy / d) * mag;
     };
-    for (const e of s.enemies.list) push(e.x + e.w / 2, e.y + e.h / 2, e);
+    const bodyForce = (body) => {
+      const nearX = Math.max(body.x, Math.min(cx, body.x + body.w));
+      const nearY = Math.max(body.y, Math.min(cy, body.y + body.h));
+      const distance = Math.hypot(nearX - cx, nearY - cy);
+      if (distance >= radiusPx) return null;
+      const dx = body.x + body.w / 2 - cx;
+      const dy = body.y + body.h / 2 - cy;
+      const d = Math.hypot(dx, dy);
+      const mag = strength * (1 - distance / radiusPx);
+      return { ix: d > 0.01 ? dx / d * mag : 0, iy: d > 0.01 ? dy / d * mag : -mag };
+    };
+    for (const e of s.enemies.list) {
+      if (e.dead) continue;
+      const force = bodyForce(e);
+      if (!force) continue;
+      e.impulseX = (e.impulseX || 0) + force.ix;
+      e.vy += force.iy;
+    }
+    if (!s.player.dead) {
+      const force = bodyForce(s.player);
+      if (force) s.receiveHit({ element: 'Air', amount: 0, bend: force });
+    }
     for (const d of s.debris) push(d.x, d.y, d);
     for (const pr of s.projectiles) push(pr.x, pr.y, pr);
+    const now = s.time.now;
+    if (!this.hitCooldowns) this.hitCooldowns = new Map();
+    for (const target of bendContacts(s, [{ x: cx, y: cy }], radiusPx)) {
+      const force = bodyForce(target.body);
+      if (!target.id || !force || !bendHitReady(this.hitCooldowns, target.id, now, 80)) continue;
+      s.reportHit(target.id, 'Air', 0, null, force);
+    }
     this.blowGas(cx, cy, radiusPx);
   }
 

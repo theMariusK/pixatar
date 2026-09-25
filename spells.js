@@ -3760,6 +3760,10 @@ function cast(s, element, form, modifier, radiusBoost = 1, caster = null, aim = 
   if (!E) return;
   const ctx = makeContext(s, element, form, modifier, caster, aim);
   GameAudio.cast(element, ctx.originX, ctx.originY);
+  if (element === 'Fire' && caster) {
+    s.fx.burst(ctx.originX, caster.y + caster.h * 0.38, 10, 'Fire',
+      { speed: 65, life: 0.5, rise: 75, size: 1.5 });
+  }
   if (radiusBoost !== 1) ctx.radius = Math.round(ctx.radius * radiusBoost);
 
   const sig = resolve(element, form, modifier);

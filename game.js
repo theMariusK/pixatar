@@ -192,6 +192,7 @@ class SandScene extends Phaser.Scene {
     this.playerAnim = {};
     this.castAnimUntil = 0;
     this.castGlowElement = null;
+    this.fireCastFxAcc = 0;
     this.prevLeftDown = false;
     this.prevRightDown = false;
     this.leftClickMode = 'dig'; // 'dig' | 'primary' | 'bend'
@@ -213,6 +214,8 @@ class SandScene extends Phaser.Scene {
       respawnAt: 0,
       burning: false,
       burnFxTimer: 0,
+      burnUntil: 0,
+      wetUntil: 0,
       impulseX: 0,
       rotation: 0,
       rotationV: 0,
@@ -450,12 +453,16 @@ class SandScene extends Phaser.Scene {
     const fireFrac = this.materialFraction(p.x, p.y, p.w, p.h, FIRE);
     const acidFrac = this.materialFraction(p.x, p.y, p.w, p.h, ACID);
     const gasFrac = this.materialFraction(p.x, p.y, p.w, p.h, GAS);
+    const waterFrac = this.materialFraction(p.x, p.y, p.w, p.h, WATER);
+    if (waterFrac > 0.1 || this.time.now < p.wetUntil) p.burnUntil = 0;
+    else if (lavaFrac > 0 || fireFrac > 0) p.burnUntil = Math.max(p.burnUntil, this.time.now + 900);
 
     let dps = 0, source = null;
     if (lavaFrac > 0) { dps += 45 * lavaFrac; source = 'Fire'; }
     else if (fireFrac > 0) { dps += 12 * fireFrac; source = 'Fire'; }
     if (acidFrac > 0) { dps += 20 * acidFrac; source ||= 'Acid'; }
     if (gasFrac > 0) { dps += 6 * gasFrac; source ||= 'Gas'; }
+    if (this.time.now < p.burnUntil) { dps += 5; source ||= 'Fire'; }
 
     if (dps > 0) this.damagePlayer(dps * dt, { source: source || 'Environment' });
   }
@@ -495,6 +502,8 @@ class SandScene extends Phaser.Scene {
     p.respawnAt = 0;
     p.burning = false;
     p.burnFxTimer = 0;
+    p.burnUntil = 0;
+    p.wetUntil = 0;
     p.rotation = 0;
     p.rotationV = 0;
     p.impulseX = 0;
@@ -691,7 +700,8 @@ class SandScene extends Phaser.Scene {
     const lavaFrac = this.materialFraction(p.x, p.y, p.w, p.h, LAVA);
     const acidFrac = this.materialFraction(p.x, p.y, p.w, p.h, ACID);
     const oilFrac = this.materialFraction(p.x, p.y, p.w, p.h, OIL);
-    p.liquid = lavaFrac > 0.2 ? 'lava' : acidFrac > 0.2 ? 'acid' : waterFrac > 0.2 ? 'water' : oilFrac > 0.2 ? 'oil' : null;
+    p.liquid = lavaFrac > 0.2 ? 'lava' : acidFrac > 0.2 ? 'acid'
+      : waterFrac > 0.2 || this.time.now < p.wetUntil ? 'water' : oilFrac > 0.2 ? 'oil' : null;
 
     if (p.dead) {
       p.vx = 0;
@@ -887,7 +897,7 @@ class SandScene extends Phaser.Scene {
   // Reports a hit on another player. Their client owns their health, so this does
   // not apply damage here — it asks the server to tell them. `effects` travel with
   // it so a Dark curse keeps working after the blast, on the victim's own machine.
-  reportHit(targetId, element, amount, effects) {
+  reportHit(targetId, element, amount, effects, bend = null) {
     if (!targetId) return;
     this.sendNet({
       t: 'hit',
@@ -895,17 +905,37 @@ class SandScene extends Phaser.Scene {
       element,
       amount: Math.round(amount * 10) / 10,
       effects: Array.isArray(effects) ? effects.slice(0, 4) : null,
+      bend,
     });
   }
 
-  // Someone else's spell caught us. Applied exactly as if we had caught ourselves,
-  // so being hit by another player feels identical to standing in your own Nova.
+  // Applies both relayed hits and contact with our own bent matter through the
+  // same health, swimming, burning and impulse rules.
   receiveHit(msg) {
     if (this.player.dead) return;
     const amount = Math.min(Math.max(+msg.amount || 0, 0), 120);
-    if (amount <= 0 && !msg.effects) return;
-    this.damagePlayer(amount, { source: msg.element });
+    if (amount <= 0 && !msg.effects && !msg.bend) return;
+    if (amount > 0) this.damagePlayer(amount, { source: msg.element });
     if (this.player.dead) return;
+    if (msg.bend) {
+      const b = msg.bend;
+      const wetMs = Math.min(Math.max(+b.wetMs || 0, 0), 1000);
+      const burnMs = Math.min(Math.max(+b.burnMs || 0, 0), 2500);
+      if (wetMs > 0) {
+        this.player.wetUntil = Math.max(this.player.wetUntil, this.time.now + wetMs);
+        this.player.burnUntil = 0;
+        this.player.liquid = 'water';
+      }
+      if (burnMs > 0 && this.time.now >= this.player.wetUntil) {
+        this.player.burnUntil = Math.max(this.player.burnUntil, this.time.now + burnMs);
+      }
+      const ix = +b.ix || 0, iy = +b.iy || 0;
+      if (Number.isFinite(ix) && Number.isFinite(iy)) {
+        this.player.impulseX = Phaser.Math.Clamp(this.player.impulseX + ix, -600, 600);
+        this.player.vy = Phaser.Math.Clamp(this.player.vy + iy, -700, 650);
+        if (ix || iy) this.player.grounded = false;
+      }
+    }
     if (Array.isArray(msg.effects)) {
       for (const e of msg.effects.slice(0, 4)) {
         if (!e || typeof e.name !== 'string') continue;
@@ -923,10 +953,12 @@ class SandScene extends Phaser.Scene {
       }
     }
     // Being hit from off-screen with no feedback would be unreadable, so mark it.
-    this.hitFlashUntil = this.time.now + 260;
-    this.fx.burst(this.player.x + this.player.w / 2, this.player.y + this.player.h / 2,
-      18, msg.element || 'Arcane', { speed: 120, life: 0.5 });
-    this.fx.shake(msg.element, 0.008, 160);
+    if (amount > 0) {
+      this.hitFlashUntil = this.time.now + 260;
+      this.fx.burst(this.player.x + this.player.w / 2, this.player.y + this.player.h / 2,
+        18, msg.element || 'Arcane', { speed: 120, life: 0.5 });
+      this.fx.shake(msg.element, 0.008, 160);
+    }
   }
 
   // ---------- remote spell visuals ----------
@@ -943,6 +975,8 @@ class SandScene extends Phaser.Scene {
     const { element, form, modifier, ox, oy, tx, ty, r } = msg;
     if (typeof ox !== 'number' || typeof ty !== 'number') return;
     GameAudio.cast(element, ox, oy);
+    if (element === 'Fire') this.fx.burst(ox, oy - PLAYER_BOX.h * 0.15, 6, 'Fire',
+      { speed: 55, life: 0.45, rise: 70, size: 1.4 });
     const angle = Math.atan2(ty - oy, tx - ox);
 
     switch (form) {
@@ -1756,6 +1790,13 @@ class SandScene extends Phaser.Scene {
     return Spells.isChannel(combo.element, combo.form, combo.modifier);
   }
 
+  emitFireCasterParticles(count = 10) {
+    const p = this.player;
+    const cx = p.x + p.w / 2;
+    this.fx.burst(cx, p.y + p.h * 0.38, count, 'Fire',
+      { speed: 65, life: 0.5, rise: 75, size: 1.5 });
+  }
+
   beginChannel(slot) {
     if (this.player.dead) return;
     // Lightning's EMP blocks starting a channel for the same reason it blocks a cast.
@@ -1787,7 +1828,10 @@ class SandScene extends Phaser.Scene {
     this.channels[slot] = Spells.startChannel(
       this, combo.element, combo.form, combo.modifier, slot, radiusBoost,
     );
-    if (this.channels[slot]) GameAudio.cast(combo.element, this.player.x + this.player.w / 2, this.player.y + this.player.h / 2);
+    if (this.channels[slot]) {
+      GameAudio.cast(combo.element, this.player.x + this.player.w / 2, this.player.y + this.player.h / 2);
+      if (combo.element === 'Fire') this.emitFireCasterParticles();
+    }
   }
 
   stopChannel(slot) {
@@ -1798,6 +1842,16 @@ class SandScene extends Phaser.Scene {
   }
 
   updateChannels(dt) {
+    const fireActive = Object.values(this.channels).some((ch) => ch && ch.element === 'Fire');
+    if (fireActive) {
+      this.fireCastFxAcc += dt * 18;
+      while (this.fireCastFxAcc >= 1) {
+        this.fireCastFxAcc--;
+        this.emitFireCasterParticles(2);
+      }
+    } else {
+      this.fireCastFxAcc = 0;
+    }
     for (const slot of ['primary', 'secondary']) {
       const ch = this.channels[slot];
       if (!ch) continue;
@@ -1833,6 +1887,7 @@ class SandScene extends Phaser.Scene {
     }
     const combo = this.spellCombos[slot];
     if (!combo) return;
+    if (combo.element === 'Fire') this.emitFireCasterParticles();
 
     // Throw the cast pose for a beat, lit by the element actually being thrown.
     this.castAnimUntil = this.time.now + 240;
@@ -2932,7 +2987,7 @@ class SandScene extends Phaser.Scene {
       rotation: p.dead ? p.rotation : 0,
     });
     if (p.dead && p.burning) this.drawCorpseFlames(g, p.x, p.y, p.w, p.h, p.rotation);
-    if (p.burning && Math.random() < dt * 18) {
+    if ((p.burning || this.time.now < p.burnUntil) && Math.random() < dt * 18) {
       const fxX = p.x + Math.random() * p.w;
       this.fx.burst(fxX, p.y + 5, 2, 'Fire', { speed: 28, life: 0.35, rise: 62, size: 1.6 });
     }
@@ -3113,7 +3168,8 @@ class SandScene extends Phaser.Scene {
     const p = this.player;
     this.sendNet({
       t: 'input', x: p.x, y: p.y, facing: p.facing, liquid: p.liquid,
-      health: Math.round(p.health), dead: p.dead, burning: p.burning, rotation: p.rotation,
+      health: Math.round(p.health), dead: p.dead,
+      burning: p.burning || this.time.now < p.burnUntil, rotation: p.rotation,
     });
   }
 
