@@ -19,10 +19,9 @@
 // up when you stop. Let go and the drops keep the momentum they had: sweep and release
 // to throw water. Each drop turns back into a water cell where it lands.
 //
-// Nothing is created or destroyed here. A drop is exactly one water cell that has
-// been taken out of the grid while it is in the air, and it goes back in when it
-// lands. The only way one is used up is by putting out fire or cooling lava, which is
-// the same cost every Water spell pays (see spells.js, "matter").
+// A drop is one water cell lifted from the grid, and goes back in when it lands.
+// Putting out fire or cooling lava spends that water; contact with fire also
+// evaporates it into steam.
 //
 // Drops live outside the grid while they fly, the way debris does, which is what lets
 // them move freely instead of obeying the sand rules. They still collide with
@@ -90,15 +89,171 @@ function bendOutward(x, y, cx, cy, index, count, phase = 0) {
   return { x: Math.cos(angle), y: Math.sin(angle) };
 }
 
-function bendClearPath(scene, x0, y0, x1, y1) {
+function bendClearPath(scene, x0, y0, x1, y1, earthShield = false) {
   const steps = Math.ceil(Math.hypot(x1 - x0, y1 - y0) / PIXEL);
   for (let i = 1; i < steps; i++) {
     const gx = Math.floor((x0 + (x1 - x0) * i / steps) / PIXEL);
     const gy = Math.floor((y0 + (y1 - y0) * i / steps) / PIXEL);
     if (gx < 0 || gx >= COLS || gy < 0 || gy >= ROWS
-      || IS_SOLID[scene.grid[scene.idx(gx, gy)]]) return false;
+      || IS_SOLID[scene.grid[scene.idx(gx, gy)]]
+      || (earthShield && bendEarthContact(scene,
+        x0 + (x1 - x0) * i / steps, y0 + (y1 - y0) * i / steps))) return false;
   }
   return true;
+}
+
+// Airborne earth occupies its actual pixel shape, including Orbit's gaps.
+function bendEarthContact(scene, x, y, pad = 0, onlyRock = null) {
+  const earth = scene.benders?.Earth;
+  const rocks = onlyRock ? [onlyRock] : earth ? [earth.rock, ...(earth.thrown || [])] : [];
+  let nearest = null, distance = Infinity;
+  for (const rock of rocks) {
+    if (!rock) continue;
+    let bounds = rock.bendBounds;
+    if (!bounds || bounds.cells !== rock.cells || bounds.count !== rock.cells.length) {
+      bounds = { cells: rock.cells, count: rock.cells.length,
+        minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity };
+      for (const cell of rock.cells) {
+        bounds.minX = Math.min(bounds.minX, cell.ox * PIXEL - PIXEL / 2);
+        bounds.maxX = Math.max(bounds.maxX, cell.ox * PIXEL + PIXEL / 2);
+        bounds.minY = Math.min(bounds.minY, cell.oy * PIXEL - PIXEL / 2);
+        bounds.maxY = Math.max(bounds.maxY, cell.oy * PIXEL + PIXEL / 2);
+      }
+      rock.bendBounds = bounds;
+    }
+    if (x < rock.x + bounds.minX - pad || x > rock.x + bounds.maxX + pad
+      || y < rock.y + bounds.minY - pad || y > rock.y + bounds.maxY + pad) continue;
+    for (const cell of rock.cells) {
+      const cx = rock.x + cell.ox * PIXEL, cy = rock.y + cell.oy * PIXEL;
+      const dx = Math.max(0, Math.abs(x - cx) - PIXEL / 2);
+      const dy = Math.max(0, Math.abs(y - cy) - PIXEL / 2);
+      const d = dx * dx + dy * dy;
+      if (d <= pad * pad && d < distance) {
+        nearest = { x: cx, y: cy, rock };
+        distance = d;
+      }
+    }
+  }
+  return nearest;
+}
+
+function bendNear(x0, y0, x1, y1, radius) {
+  const dx = x1 - x0, dy = y1 - y0;
+  return dx * dx + dy * dy <= radius * radius;
+}
+
+function bendSteam(scene, x, y, amount = 1) {
+  const gx = Math.floor(x / PIXEL), gy = Math.floor(y / PIXEL);
+  if (gx > 0 && gx < COLS - 1 && gy > 0 && gy < ROWS - 1) {
+    const id = scene.idx(gx, gy), mat = scene.grid[id];
+    if (mat === EMPTY || mat === FIRE || (mat === SMOKE && scene.life[id] < SMOKE_LIFE)) {
+      scene.setCell(id, SMOKE, SMOKE_LIFE);
+    }
+  }
+  scene.fx.smoke(x, y, Math.min(12, 2 + amount), 'Water',
+    { speed: 25, rise: 85, life: 0.75, size: 1.8 });
+}
+
+function bendCoolBall(scene, ball, x, y) {
+  const before = Math.max(1, ball.mass);
+  ball.mass = Math.max(0, before - 6); // each water cell absorbs six embers' heat
+  const ratio = Math.sqrt(ball.mass / before);
+  ball.size *= ratio;
+  for (const ember of ball.embers || []) ember.radius *= ratio;
+  if (ball.mass === 0) ball.doused = true;
+  bendSteam(scene, x, y, Math.min(6, before));
+}
+
+function bendReactWater(scene, drop) {
+  const fire = scene.benders?.Fire;
+  if (!fire) return false;
+  for (const ball of fire.fireballs) {
+    if (ball.doused || !bendNear(drop.x, drop.y, ball.x, ball.y, ball.size + PIXEL)) continue;
+    if (!bendClearPath(scene, drop.x, drop.y, ball.x, ball.y, true)) continue;
+    bendCoolBall(scene, ball, drop.x, drop.y);
+    return true;
+  }
+  for (const list of [fire.held, fire.free]) {
+    const index = list.findIndex((ember) => bendNear(drop.x, drop.y, ember.x, ember.y, PIXEL * 1.5)
+      && bendClearPath(scene, drop.x, drop.y, ember.x, ember.y, true));
+    if (index < 0) continue;
+    list.splice(index, 1);
+    bendSteam(scene, drop.x, drop.y);
+    return true;
+  }
+  return false;
+}
+
+function bendReactFire(scene, ember) {
+  const water = scene.benders?.Water;
+  if (!water) return false;
+  for (const list of [water.held, water.free]) {
+    const index = list.findIndex((drop) => bendNear(ember.x, ember.y, drop.x, drop.y, PIXEL * 1.5)
+      && bendClearPath(scene, ember.x, ember.y, drop.x, drop.y, true));
+    if (index < 0) continue;
+    const [drop] = list.splice(index, 1);
+    bendSteam(scene, drop.x, drop.y);
+    return true;
+  }
+  return false;
+}
+
+function bendCoolBallInWater(scene, ball) {
+  const water = scene.benders?.Water;
+  for (const list of water ? [water.held, water.free] : []) {
+    for (let i = list.length - 1; i >= 0 && !ball.doused; i--) {
+      const drop = list[i];
+      if (!bendNear(ball.x, ball.y, drop.x, drop.y, ball.size + PIXEL)
+        || !bendClearPath(scene, ball.x, ball.y, drop.x, drop.y, true)) continue;
+      list.splice(i, 1);
+      bendCoolBall(scene, ball, drop.x, drop.y);
+    }
+  }
+  return ball.doused;
+}
+
+function bendDeflect(scene, drop, contact) {
+  const rvx = (drop.vx || 0) - (contact.rock.vx || 0);
+  const rvy = (drop.vy || 0) - (contact.rock.vy || 0);
+  let dx = drop.x - contact.x, dy = drop.y - contact.y;
+  let d = Math.hypot(dx, dy);
+  if (d < 0.01) { dx = -rvx; dy = -rvy || -1; d = Math.hypot(dx, dy); }
+  const nx = dx / d, ny = dy / d;
+  const inward = rvx * nx + rvy * ny;
+  if (inward < 0) {
+    drop.vx = (drop.vx || 0) - inward * nx * 1.5;
+    drop.vy = (drop.vy || 0) - inward * ny * 1.5;
+  }
+  const x = contact.x + nx * PIXEL * 2, y = contact.y + ny * PIXEL * 2;
+  if (x >= PIXEL && x < (COLS - 1) * PIXEL && y >= PIXEL && y < (ROWS - 1) * PIXEL
+    && bendClearPath(scene, drop.x, drop.y, x, y)
+    && !IS_SOLID[scene.grid[scene.idx(Math.floor(x / PIXEL), Math.floor(y / PIXEL))]]) {
+    drop.x = x; drop.y = y;
+  }
+}
+
+// A moving or rotating rock must also intercept stationary airborne attacks.
+function bendInterceptRock(scene, rock) {
+  for (const element of ['Water', 'Air']) {
+    const bender = scene.benders?.[element];
+    for (const list of bender ? [bender.held, bender.free] : []) {
+      for (const drop of list) {
+        const contact = bendEarthContact(scene, drop.x, drop.y, PIXEL / 2, rock);
+        if (contact) bendDeflect(scene, drop, contact);
+      }
+    }
+  }
+  const fire = scene.benders?.Fire;
+  for (const list of fire ? [fire.held, fire.free] : []) {
+    for (let i = list.length - 1; i >= 0; i--) {
+      if (!bendEarthContact(scene, list[i].x, list[i].y, PIXEL / 2, rock)) continue;
+      scene.fx.burst(list[i].x, list[i].y, 3, 'Fire', { speed: 45, life: 0.2, size: 0.8 });
+      list.splice(i, 1);
+    }
+  }
+  for (const ball of fire?.fireballs || []) {
+    if (!ball.doused && bendEarthContact(scene, ball.x, ball.y, ball.size, rock)) ball.earthBlocked = true;
+  }
 }
 
 // True while this element's bending owns the left mouse button.
@@ -480,7 +635,7 @@ class WaterBending {
       if (!bendBodyWithin(target.body, x, y, radius)) continue;
       const bx = target.body.x + target.body.w / 2;
       const by = target.body.y + target.body.h / 2;
-      if (!bendClearPath(s, x, y, bx, by)) continue;
+      if (!bendClearPath(s, x, y, bx, by, true)) continue;
       const key = target.id || target.enemy;
       if (!bendHitReady(this.hitCooldowns, key, now, 170)) continue;
       const dir = bendOutward(bx, by, x, y, 0, 1);
@@ -493,7 +648,7 @@ class WaterBending {
     }
     for (const obj of [...s.debris]) {
       if (Math.hypot(obj.x - x, obj.y - y) > radius
-        || !bendClearPath(s, x, y, obj.x, obj.y)) continue;
+        || !bendClearPath(s, x, y, obj.x, obj.y, true)) continue;
       const dir = bendOutward(obj.x, obj.y, x, y, 0, 1);
       obj.vx += dir.x * impulse;
       obj.vy += dir.y * impulse - 35;
@@ -648,6 +803,7 @@ class WaterBending {
     const s = this.scene;
     for (let i = this.free.length - 1; i >= 0; i--) {
       const d = this.free[i];
+      if (d.bendAbility) continue; // whip/shield own movement; reactions can still consume the drop
       d.age += dt;
       d.vy += BEND.GRAVITY * dt;
       d.vx *= 1 - Math.min(1, 0.4 * dt);
@@ -675,16 +831,20 @@ class WaterBending {
     const sx = (d.vx * dt) / steps, sy = (d.vy * dt) / steps;
     let blocked = false;
     for (let k = 0; k < steps; k++) {
+      if (bendReactWater(s, d)) return 'consumed';
+      const earth = bendEarthContact(s, d.x + sx, d.y + sy, PIXEL / 2);
+      if (earth) { bendDeflect(s, d, earth); return 'ok'; }
       if (this.solidAt(d.x + sx, d.y)) this.erodeSurface(d, d.x + sx, d.y);
       if (this.solidAt(d.x + sx, d.y)) { d.vx *= -0.15; blocked = true; } else d.x += sx;
       if (this.solidAt(d.x, d.y + sy)) this.erodeSurface(d, d.x, d.y + sy);
       if (this.solidAt(d.x, d.y + sy)) { d.vy *= -0.15; blocked = true; } else d.y += sy;
-      if (d.punched) this.touchPunchDrop(d);
+      if (bendReactWater(s, d)) return 'consumed';
       const gx = Math.floor(d.x / PIXEL), gy = Math.floor(d.y / PIXEL);
       const id = s.idx(gx, gy);
       const m = s.grid[id];
-      if (m === FIRE) { s.setCell(id, SMOKE, SMOKE_LIFE); return 'consumed'; }
+      if (m === FIRE) { bendSteam(s, d.x, d.y); return 'consumed'; }
       if (m === LAVA) { s.setCell(id, STONE); return 'consumed'; }
+      if (d.punched) this.touchPunchDrop(d);
       if (blocked) break;
     }
     return blocked ? 'blocked' : 'ok';
@@ -1149,6 +1309,7 @@ class EarthBending {
     const dtheta = ORBIT.SPIN * dt;
     const cos = Math.cos(dtheta), sin = Math.sin(dtheta);
     const contacts = new Map();
+    rock.bendBounds = null; // rotation changes offsets as well as the centre
     let fastest = { vx: centerVx, vy: centerVy, speed: Math.hypot(centerVx, centerVy) };
     for (const c of rock.cells) {
       const before = this.solidAt(oldX + c.ox * PIXEL, oldY + c.oy * PIXEL);
@@ -1170,6 +1331,7 @@ class EarthBending {
       }
     }
     const impactRock = { ...rock, vx: fastest.vx, vy: fastest.vy, impactSource: rock };
+    bendInterceptRock(this.scene, impactRock);
     if (contacts.size && this.scene.time.now >= (rock.orbitImpactUntil || 0)) {
       this.crumbleTerrain(impactRock, [...contacts.values()]);
       rock.orbitImpactUntil = this.scene.time.now + 220;
@@ -1217,6 +1379,7 @@ class EarthBending {
         } else rock.y += sy;
       }
       this.strikeBodies(rock, impactSpeed);
+      bendInterceptRock(this.scene, rock);
       if (hit.down) break;
     }
     return hit;
@@ -1516,6 +1679,9 @@ class FireBending {
     const now = s.time.now;
     for (const target of bendContacts(s, [{ x, y }], radius)) {
       if (!bendBodyWithin(target.body, x, y, radius)) continue;
+      const bx = Math.max(target.body.x, Math.min(x, target.body.x + target.body.w));
+      const by = Math.max(target.body.y, Math.min(y, target.body.y + target.body.h));
+      if (!bendClearPath(s, x, y, bx, by, true)) continue;
       if (target.enemy) {
         s.damageEnemy(target.enemy, amount, 'Fire');
         target.enemy.burnUntil = now + 1200;
@@ -1528,12 +1694,13 @@ class FireBending {
   burnDebris(x, y, radius, heat = 0.3) {
     const s = this.scene;
     for (const obj of [...s.debris]) {
-      if (Math.hypot(obj.x - x, obj.y - y) > radius) continue;
+      if (Math.hypot(obj.x - x, obj.y - y) > radius
+        || !bendClearPath(s, x, y, obj.x, obj.y, true)) continue;
       this.surfaceDamage.object(obj, heat, 'Fire');
     }
   }
 
-  igniteBurst(x, y, radius, heat = 0.3) {
+  igniteBurst(x, y, radius, heat = 0.3, evaporation = 0) {
     const s = this.scene;
     const gx = Math.floor(x / PIXEL), gy = Math.floor(y / PIXEL);
     for (let dy = -radius; dy <= radius; dy++) {
@@ -1542,9 +1709,14 @@ class FireBending {
         if (distance > radius || Math.random() > 0.65 * (1 - distance / (radius + 1))) continue;
         const xx = gx + dx, yy = gy + dy;
         if (xx <= 0 || xx >= COLS - 1 || yy <= 0 || yy >= ROWS - 1) continue;
+        if (!bendClearPath(s, x, y, xx * PIXEL + PIXEL / 2, yy * PIXEL + PIXEL / 2, true)) continue;
         const id = s.idx(xx, yy);
         const mat = s.grid[id];
-        if (mat === EMPTY || mat === SMOKE || mat === GAS) {
+        if (mat === WATER && evaporation > 0) {
+          s.setCell(id, SMOKE, SMOKE_LIFE);
+          evaporation--;
+          bendSteam(s, xx * PIXEL + PIXEL / 2, yy * PIXEL + PIXEL / 2);
+        } else if (mat === EMPTY || mat === SMOKE || mat === GAS) {
           s.setCell(id, FIRE, PixelWorld.FIRE_LIFE);
         } else if (IS_SOLID[mat] && bendExposedCell(s, xx, yy)) {
           this.igniteCell(xx, yy, heat * (1 - distance / (radius + 1)));
@@ -1571,6 +1743,7 @@ class FireBending {
         const gy = Math.floor((oy + (y - oy) * i / steps) / PIXEL);
         if (gx < 0 || gx >= COLS || gy < 0 || gy >= ROWS) return 0;
         const id = s.idx(gx, gy);
+        if (bendEarthContact(s, ox + (x - ox) * i / steps, oy + (y - oy) * i / steps)) return 0;
         if (id === previous || id === end) continue;
         previous = id;
         if (IS_SOLID[s.grid[id]]) pressure -= PixelWorld.IMPACT_RESISTANCE[s.grid[id]] * 0.8;
@@ -1625,7 +1798,7 @@ class FireBending {
     if (!doused) {
       const heat = Math.min(0.9, 0.15 + Math.sqrt(ball.mass) * 0.06);
       this.explodeFireball(ball, radius, heat);
-      this.igniteBurst(ball.x, ball.y, radius, heat);
+      this.igniteBurst(ball.x, ball.y, radius, heat, Math.min(24, Math.ceil(ball.mass / 6)));
       this.damageBurst(ball.x, ball.y, radius * PIXEL * 1.4,
         Math.min(36, 9 + ball.mass * 0.2));
     }
@@ -1638,6 +1811,8 @@ class FireBending {
       s.fx.shockwave(ball.x, ball.y, 'Fire',
         { r0: ball.size, r1: radius * PIXEL * 1.9, life: 0.4, width: 3, rings: 2 });
       s.fx.hitstop(35);
+    } else {
+      bendSteam(s, ball.x, ball.y, Math.min(12, 2 + Math.sqrt(ball.mass)));
     }
     s.fx.ring(ball.x, ball.y, doused ? 'Water' : 'Fire',
       { r0: 2, r1: radius * PIXEL * 1.6, life: 0.35, width: 3 });
@@ -1685,6 +1860,11 @@ class FireBending {
     const s = this.scene;
     for (let i = this.fireballs.length - 1; i >= 0; i--) {
       const ball = this.fireballs[i];
+      if (ball.doused || ball.earthBlocked || bendCoolBallInWater(s, ball)) {
+        this.impactFireball(ball, !!ball.doused);
+        this.fireballs.splice(i, 1);
+        continue;
+      }
       ball.life -= dt;
       ball.age += dt;
       const fromX = ball.x, fromY = ball.y;
@@ -1698,8 +1878,13 @@ class FireBending {
           impact = true; doused = true; break;
         }
         const mat = s.grid[s.idx(gx, gy)];
-        if (mat === WATER) { impact = true; doused = true; break; }
+        if (mat === WATER) {
+          s.setCell(s.idx(gx, gy), SMOKE, SMOKE_LIFE);
+          impact = true; doused = true; break;
+        }
         if (IS_SOLID[mat]) { impact = true; break; }
+        if (bendEarthContact(s, ball.x, ball.y, ball.size)) { impact = true; break; }
+        if (bendCoolBallInWater(s, ball)) { impact = true; doused = true; break; }
         if (s.debris.some((obj) => Math.hypot(obj.x - ball.x, obj.y - ball.y) <= ball.size + PIXEL)) {
           impact = true; break;
         }
@@ -1864,8 +2049,8 @@ class FireBending {
       d.vx *= 1 - Math.min(1, 0.3 * dt);
       const res = this.moveDrop(d, dt);
       if (res === 'consumed') { this.free.splice(i, 1); continue; }
-      if (res === 'blocked' || d.age > FIRE_BEND.FREE_LIFE) {
-        this.settle(d);
+      if (res === 'blocked' || d.age > (d.maxAge ?? FIRE_BEND.FREE_LIFE)) {
+        if (!d.flameJet || res === 'blocked') this.settle(d);
         this.free.splice(i, 1);
       }
     }
@@ -1881,6 +2066,11 @@ class FireBending {
     const sx = (d.vx * dt) / steps, sy = (d.vy * dt) / steps;
     let blocked = false;
     for (let k = 0; k < steps; k++) {
+      if (bendReactFire(s, d)) return 'consumed';
+      if (bendEarthContact(s, d.x + sx, d.y + sy, PIXEL / 2)) {
+        s.fx.burst(d.x, d.y, 3, 'Fire', { speed: 45, life: 0.2, size: 0.8 });
+        return 'consumed';
+      }
       if (this.solidAt(d.x + sx, d.y)) {
         if (this.igniteCell(Math.floor((d.x + sx) / PIXEL), Math.floor(d.y / PIXEL), dt * 1.6)) return 'consumed';
         blocked = true;
@@ -1891,17 +2081,37 @@ class FireBending {
       } else d.y += sy;
       const gx = Math.floor(d.x / PIXEL), gy = Math.floor(d.y / PIXEL);
       const id = s.idx(gx, gy);
-      if (s.grid[id] === WATER) return 'consumed';
+      if (bendReactFire(s, d)) return 'consumed';
+      if (s.grid[id] === WATER) {
+        s.setCell(id, SMOKE, SMOKE_LIFE);
+        bendSteam(s, d.x, d.y);
+        return 'consumed';
+      }
+      if (d.flameJet && this.touchJet(d)) return 'consumed';
       if (this.igniteCell(gx, gy, dt * 1.6)) return 'consumed';
       const obj = s.debris.find((o) => Math.hypot(o.x - d.x, o.y - d.y) < PIXEL * 2
         && Number.isFinite(PixelWorld.IMPACT_RESISTANCE[o.mat]));
       if (obj) {
-        this.surfaceDamage.object(obj, 0.08, 'Fire');
+        this.surfaceDamage.object(obj, d.flameJet ? 0.22 : 0.08, 'Fire');
         return 'consumed';
       }
       if (blocked) break;
     }
     return blocked ? 'blocked' : 'ok';
+  }
+
+  touchJet(ember) {
+    const s = this.scene;
+    const contacts = bendContacts(s, [ember], PIXEL);
+    for (const target of contacts) {
+      if (!bendHitReady(this.hitCooldowns, target.id || target.enemy, s.time.now, 230)) continue;
+      if (target.enemy) {
+        s.damageEnemy(target.enemy, 4, 'Fire');
+        target.enemy.burnUntil = s.time.now + 1200;
+      } else s.reportHit(target.id, 'Fire', 4, null, { burnMs: 1200 });
+      s.fx.burst(ember.x, ember.y, 5, 'Fire', { speed: 45, life: 0.25, size: 1.1 });
+    }
+    return contacts.length > 0;
   }
 
   // Direct contact starts a lasting burn; masonry needs sustained heating.
@@ -2259,6 +2469,8 @@ class AirBending {
     const sx = (d.vx * dt) / steps, sy = (d.vy * dt) / steps;
     let blocked = false;
     for (let k = 0; k < steps; k++) {
+      const earth = bendEarthContact(this.scene, d.x + sx, d.y + sy, PIXEL / 2);
+      if (earth) { bendDeflect(this.scene, d, earth); return 'ok'; }
       if (this.solidAt(d.x + sx, d.y)) this.erodeSurface(d, d.x + sx, d.y);
       if (this.solidAt(d.x + sx, d.y)) { d.vx *= -0.1; blocked = true; } else d.x += sx;
       if (this.solidAt(d.x, d.y + sy)) this.erodeSurface(d, d.x, d.y + sy);
@@ -2302,7 +2514,7 @@ class AirBending {
   }
 
   // Pushes bodies and loose objects away from the gust, including the caster.
-  gust(cx, cy, radiusPx, strength, direction = null, innerRadius = 0) {
+  gust(cx, cy, radiusPx, strength, direction = null, innerRadius = 0, swirl = 0) {
     const s = this.scene;
     const falloff = (distance) => {
       if (distance >= radiusPx || distance < innerRadius) return 0;
@@ -2310,14 +2522,14 @@ class AirBending {
       const half = (radiusPx - innerRadius) / 2;
       return Math.max(0, 1 - Math.abs(distance - innerRadius - half) / half);
     };
-    const push = (ox, oy, obj, mass = 1) => {
+    const push = (ox, oy, obj, mass = 1, earthTarget = false) => {
       const dx = ox - cx, dy = oy - cy;
       const d = Math.max(1, Math.hypot(dx, dy));
       const mag = strength * falloff(d) / Math.sqrt(Math.max(1, mass));
       if (!mag) return;
-      if (!bendClearPath(s, cx, cy, ox, oy)) return;
-      obj.vx += (direction ? direction.x : dx / d) * mag;
-      obj.vy += (direction ? direction.y : dx === 0 && dy === 0 ? -1 : dy / d) * mag;
+      if (!bendClearPath(s, cx, cy, ox, oy, !earthTarget)) return;
+      obj.vx += (direction ? direction.x : (dx - swirl * dy) / d) * mag;
+      obj.vy += (direction ? direction.y : dx === 0 && dy === 0 ? (swirl ? 0.4 : -1) : (dy + swirl * dx) / d) * mag;
       return mag;
     };
     const bodyForce = (body) => {
@@ -2326,12 +2538,13 @@ class AirBending {
       const distance = Math.hypot(nearX - cx, nearY - cy);
       const fall = falloff(distance);
       if (!fall) return null;
+      if (!bendClearPath(s, cx, cy, nearX, nearY, true)) return null;
       const dx = body.x + body.w / 2 - cx;
       const dy = body.y + body.h / 2 - cy;
       const d = Math.hypot(dx, dy);
       const mag = strength * fall;
-      return { ix: direction ? direction.x * mag : d > 0.01 ? dx / d * mag : 0,
-        iy: direction ? direction.y * mag : d > 0.01 ? dy / d * mag : -mag };
+      return { ix: direction ? direction.x * mag : d > 0.01 ? (dx - swirl * dy) / d * mag : 0,
+        iy: direction ? direction.y * mag : d > 0.01 ? (dy + swirl * dx) / d * mag : (swirl ? mag * 0.4 : -mag) };
     };
     for (const e of s.enemies.list) {
       if (e.dead) continue;
@@ -2346,17 +2559,33 @@ class AirBending {
     }
     for (const d of [...s.debris]) {
       const force = push(d.x, d.y, d);
-      if (force) this.surfaceDamage.object(d, force * BEND_DAMAGE.AIR_POWER, 'Air');
+      if (force) this.surfaceDamage.object(d, Math.abs(force) * BEND_DAMAGE.AIR_POWER, 'Air');
     }
     for (const pr of s.projectiles) push(pr.x, pr.y, pr);
     const earth = s.benders?.Earth;
     if (earth) {
-      if (earth.rock) push(earth.rock.x, earth.rock.y, earth.rock, earth.rock.cells.length);
-      for (const rock of earth.thrown || []) push(rock.x, rock.y, rock, rock.cells.length);
+      if (earth.rock) push(earth.rock.x, earth.rock.y, earth.rock, earth.rock.cells.length, true);
+      for (const rock of earth.thrown || []) push(rock.x, rock.y, rock, rock.cells.length, true);
       for (const piece of earth.loosePieces || []) push(piece.x, piece.y, piece);
     }
-    for (const ball of s.benders?.Fire?.fireballs || []) {
-      push(ball.x, ball.y, ball, Math.max(1, ball.mass * 0.1));
+    const fire = s.benders?.Fire;
+    for (const ball of fire?.fireballs || []) {
+      if (!ball.doused && !ball.earthBlocked) push(ball.x, ball.y, ball, Math.max(1, ball.mass * 0.1));
+    }
+    for (const ember of fire ? [...fire.held, ...fire.free] : []) {
+      const force = push(ember.x, ember.y, ember);
+      // Strong wind strips real embers from the held flame and carries them
+      // downwind; it never duplicates fire or adds fuel to their lifetime.
+      const heldIndex = fire.held.indexOf(ember);
+      if (Math.abs(force) > 65 && heldIndex >= 0) {
+        fire.held.splice(heldIndex, 1);
+        ember.age = Math.max(0, FIRE_BEND.FREE_LIFE - ember.life);
+        fire.free.push(ember);
+      }
+    }
+    const water = s.benders?.Water;
+    for (const drop of water ? [...water.held, ...water.free] : []) {
+      push(drop.x, drop.y, drop);
     }
     const now = s.time.now;
     if (!this.hitCooldowns) this.hitCooldowns = new Map();
@@ -2365,21 +2594,23 @@ class AirBending {
       if (!target.id || !force || !bendHitReady(this.hitCooldowns, target.id, now, 80)) continue;
       s.reportHit(target.id, 'Air', 0, null, force);
     }
-    this.blowGas(cx, cy, radiusPx, direction, strength, innerRadius);
+    this.blowGas(cx, cy, radiusPx, direction, strength, innerRadius, swirl);
   }
 
   // Wind moves smoke, gas, and flames while lightly wearing exposed surfaces.
   // The candidate budget keeps broad gusts from damaging an unbounded area.
-  blowGas(cx, cy, radiusPx, direction = null, strength = 0, innerRadius = 0) {
+  blowGas(cx, cy, radiusPx, direction = null, strength = 0, innerRadius = 0, swirl = 0) {
     const s = this.scene;
     const gx0 = Math.max(1, Math.floor((cx - radiusPx) / PIXEL));
     const gx1 = Math.min(COLS - 2, Math.floor((cx + radiusPx) / PIXEL));
     const gy0 = Math.max(1, Math.floor((cy - radiusPx) / PIXEL));
     const gy1 = Math.min(ROWS - 2, Math.floor((cy + radiusPx) / PIXEL));
     let budget = AIR_BEND.GAS_BUDGET;
+    const moved = new Set();
     for (let y = gy0; y <= gy1 && budget > 0; y++) {
       for (let x = gx0; x <= gx1 && budget > 0; x++) {
         const id = s.idx(x, y);
+        if (moved.has(id)) continue;
         const m = s.grid[id];
         const surface = IS_SOLID[m] && Number.isFinite(PixelWorld.IMPACT_RESISTANCE[m]);
         if (m !== SMOKE && m !== GAS && m !== FIRE && !surface) continue;
@@ -2387,24 +2618,40 @@ class AirBending {
         const dx = wx - cx, dy = wy - cy;
         const d = Math.hypot(dx, dy);
         if (d >= radiusPx || d < innerRadius) continue;
+        if (!bendClearPath(s, cx, cy, wx, wy, true)) continue;
         if (surface) {
-          if (!strength || !bendExposedCell(s, x, y) || !bendClearPath(s, cx, cy, wx, wy)) continue;
+          if (!strength || !bendExposedCell(s, x, y)) continue;
           budget--;
-          this.surfaceDamage.cell(x, y, strength * BEND_DAMAGE.AIR_POWER * (1 - d / radiusPx), 'Air');
+          this.surfaceDamage.cell(x, y, Math.abs(strength) * BEND_DAMAGE.AIR_POWER * (1 - d / radiusPx), 'Air');
           continue;
         }
         budget--;
         if (Math.random() > AIR_BEND.GAS_CHANCE) continue;
-        const ux = direction ? direction.x : d > 0.01 ? dx / d : 0;
-        const uy = direction ? direction.y : d > 0.01 ? dy / d : -1;
+        const sign = strength < 0 ? -1 : 1;
+        const ux = direction ? direction.x : d > 0.01 ? (dx - swirl * dy) / d * sign : 0;
+        const uy = direction ? direction.y : d > 0.01 ? (dy + swirl * dx) / d * sign : -1;
         const nx = x + Math.round(ux), ny = y + Math.round(uy);
         if (nx === x && ny === y) continue;
         if (nx <= 0 || nx >= COLS - 1 || ny <= 0 || ny >= ROWS - 1) continue;
         const nid = s.idx(nx, ny);
+        if (bendEarthContact(s, nx * PIXEL + PIXEL / 2, ny * PIXEL + PIXEL / 2)) continue;
+        if (m === FIRE && PixelWorld.FLAMMABILITY[s.grid[nid]] > 0 && strength !== 0) {
+          this.surfaceDamage.cell(nx, ny,
+            Math.min(0.35, Math.abs(strength) * 0.002) * (1 - d / radiusPx), 'Fire');
+          continue;
+        }
+        if (m === FIRE && s.grid[nid] === WATER) {
+          s.setCell(nid, SMOKE, SMOKE_LIFE);
+          s.setCell(id, SMOKE, SMOKE_LIFE);
+          moved.add(nid);
+          bendSteam(s, nx * PIXEL + PIXEL / 2, ny * PIXEL + PIXEL / 2);
+          continue;
+        }
         if (s.grid[nid] !== EMPTY) continue;
         const life = s.life[id];
         s.setCell(nid, m, life);
         s.setCell(id, EMPTY);
+        moved.add(nid);
       }
     }
   }

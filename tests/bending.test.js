@@ -70,6 +70,245 @@ function scene() {
   };
 }
 
+function elementalScene() {
+  const s = scene();
+  s.benders = {
+    Water: new WaterBending(s), Earth: new EarthBending(s),
+    Fire: new FireBending(s), Air: new AirBending(s),
+  };
+  return s;
+}
+
+function fireball(x = 180, y = 180, mass = 24) {
+  return { x, y, mass, size: 9, vx: 440, vy: 0, age: 0, life: 2, trail: 0,
+    embers: [{ radius: 5, angle: 0, spin: 1, phase: 0, scale: 1 }] };
+}
+
+function earthShield(x = 210, y = 180) {
+  return { x, y, vx: 0, vy: 0, age: 1,
+    cells: Array.from({ length: 7 }, (_, i) => ({ ox: 0, oy: i - 3, shade: 0 })) };
+}
+
+test('water and airborne embers consume each other into steam regardless of which moves', () => {
+  for (const element of ['Water', 'Fire']) {
+    const s = elementalScene();
+    const drop = { x: element === 'Water' ? 180 : 192, y: 180, vx: 0, vy: 0, age: 0 };
+    const ember = { x: element === 'Fire' ? 180 : 192, y: 180, vx: 0, vy: 0, age: 0, life: 5 };
+    s.benders.Water.free.push(drop);
+    s.benders.Fire.free.push(ember);
+    s.benders[element].free[0].vx = 400;
+    s.benders[element].updateFree(0.05);
+    assert.equal(s.benders.Water.free.length, 0);
+    assert.equal(s.benders.Fire.free.length, 0);
+    assert.ok(s.grid.includes(MAT.SMOKE));
+    assert.ok(!s.grid.includes(MAT.FIRE));
+    assert.ok(s.visualFx.some((fx) => fx[0] === 'smoke' && fx[4] === 'Water'));
+  }
+});
+
+test('held water extinguishes an incoming fireball before it can hit a player or object', () => {
+  const s = elementalScene();
+  s.remotePlayers.other = { x: 200, y: 164 };
+  const wood = { x: 203, y: 180, mat: MAT.WOOD, vx: 0, vy: 0 };
+  s.debris.push(wood);
+  for (let i = 0; i < 5; i++) s.benders.Water.held.push({ x: 193, y: 180, vx: 0, vy: 0 });
+  s.benders.Fire.fireballs.push(fireball(180, 180, 25));
+  s.benders.Fire.updateFireballs(0.08);
+  assert.equal(s.benders.Fire.fireballs.length, 0);
+  assert.equal(s.benders.Water.held.length, 0);
+  assert.equal(s.hits.length, 0);
+  assert.equal(s.debris[0], wood);
+  assert.equal(wood.vx, 0);
+  assert.ok(!s.grid.includes(MAT.FIRE));
+});
+
+test('a small amount of water evaporates and reduces fireball size and damage potential', () => {
+  const s = elementalScene();
+  const ball = fireball();
+  s.benders.Fire.fireballs.push(ball);
+  s.benders.Water.free.push({ x: 180, y: 180, vx: 0, vy: 0, age: 0 });
+  s.benders.Fire.updateFireballs(0.01);
+  assert.equal(s.benders.Water.free.length, 0);
+  assert.equal(s.benders.Fire.fireballs[0], ball);
+  assert.equal(ball.mass, 18);
+  assert.ok(ball.size < 9 && ball.embers[0].radius < 5);
+  assert.ok(s.grid.includes(MAT.SMOKE));
+});
+
+test('a fast Water Punch intercepts a fireball between flight steps', () => {
+  const s = elementalScene();
+  s.benders.Water.free.push({ x: 150, y: 180, vx: 720, vy: 0, punched: true, age: 0 });
+  s.benders.Fire.fireballs.push(fireball(190, 180, 6));
+  s.benders.Water.updateFree(0.1);
+  s.benders.Fire.updateFireballs(0.01);
+  assert.equal(s.benders.Water.free.length, 0);
+  assert.equal(s.benders.Fire.fireballs.length, 0);
+  assert.ok(!s.grid.includes(MAT.FIRE));
+});
+
+test('fire evaporates grid water into steam instead of silently disappearing', () => {
+  const s = elementalScene();
+  s.grid[s.idx(60, 60)] = MAT.WATER;
+  s.benders.Fire.free.push({ x: 181.5, y: 181.5, vx: 0, vy: 0, age: 0 });
+  s.benders.Fire.updateFree(0.01);
+  assert.equal(s.benders.Fire.free.length, 0);
+  assert.equal(s.grid[s.idx(60, 60)], MAT.SMOKE);
+  assert.ok(s.visualFx.some((fx) => fx[0] === 'smoke' && fx[4] === 'Water'));
+});
+
+test('grid water douses fireballs and a nearby blast evaporates only a bounded amount', () => {
+  const s = elementalScene();
+  s.grid[s.idx(61, 60)] = MAT.WATER;
+  s.benders.Fire.fireballs.push(fireball());
+  s.benders.Fire.updateFireballs(0.05);
+  assert.equal(s.benders.Fire.fireballs.length, 0);
+  assert.equal(s.grid[s.idx(61, 60)], MAT.SMOKE);
+  assert.ok(!s.grid.includes(MAT.FIRE));
+  for (let x = 60; x < 68; x++) s.grid[s.idx(x, 60)] = MAT.WATER;
+  s.benders.Fire.igniteBurst(181.5, 181.5, 8, 0.5, 2);
+  let remaining = 0;
+  for (let x = 60; x < 68; x++) remaining += s.grid[s.idx(x, 60)] === MAT.WATER;
+  assert.equal(remaining, 6);
+});
+
+test('water cannot react with airborne fire through a solid wall', () => {
+  const s = elementalScene();
+  s.grid[s.idx(61, 60)] = MAT.BEDROCK;
+  s.benders.Water.held.push({ x: 186, y: 181.5, vx: 0, vy: 0 });
+  const ball = fireball(180, 181.5);
+  s.benders.Fire.fireballs.push(ball);
+  s.benders.Fire.updateFireballs(0.01);
+  assert.equal(ball.mass, 24);
+  assert.equal(s.benders.Water.held.length, 1);
+  assert.equal(s.grid[s.idx(61, 60)], MAT.BEDROCK);
+});
+
+test('air carries existing bent embers, water and fireballs without duplicating particles', () => {
+  const s = elementalScene();
+  const ember = { x: 180, y: 180, vx: 0, vy: 0, life: 2 };
+  const drop = { x: 185, y: 180, vx: 0, vy: 0 };
+  const ball = fireball(190);
+  s.benders.Fire.held.push(ember);
+  s.benders.Water.held.push(drop);
+  s.benders.Fire.fireballs.push(ball);
+  s.benders.Air.gust(170, 180, 50, 180, { x: 1, y: 0 });
+  assert.equal(s.benders.Fire.held.length, 0);
+  assert.equal(s.benders.Fire.free.length, 1);
+  assert.equal(s.benders.Fire.free[0], ember);
+  assert.ok(ember.vx > 0 && drop.vx > 0 && ball.vx > 440);
+  assert.equal(s.benders.Water.held.length, 1);
+  assert.equal(ball.mass, 24);
+});
+
+test('wind moves a grid flame once per gust and feeds a downwind fuel surface', () => {
+  const s = elementalScene();
+  s.grid[s.idx(65, 60)] = MAT.FIRE;
+  s.life[s.idx(65, 60)] = 30;
+  s.benders.Air.blowGas(170, 181.5, 60, { x: 1, y: 0 }, 180);
+  assert.equal(s.grid[s.idx(65, 60)], MAT.EMPTY);
+  assert.equal(s.grid[s.idx(66, 60)], MAT.FIRE);
+  assert.equal(s.life[s.idx(66, 60)], 30);
+  assert.equal(s.grid[s.idx(67, 60)], MAT.EMPTY);
+  s.grid[s.idx(67, 60)] = MAT.WOOD;
+  s.benders.Air.blowGas(170, 181.5, 60, { x: 1, y: 0 }, 180);
+  s.time.now += 3000;
+  s.bendingDamage.update(3);
+  assert.equal(s.grid[s.idx(67, 60)], MAT.FIRE);
+});
+
+test('wind-driven grid fire turns water into steam instead of passing through it', () => {
+  const s = elementalScene();
+  s.grid[s.idx(65, 60)] = MAT.FIRE;
+  s.grid[s.idx(66, 60)] = MAT.WATER;
+  s.benders.Air.blowGas(170, 181.5, 60, { x: 1, y: 0 }, 180);
+  assert.equal(s.grid[s.idx(65, 60)], MAT.SMOKE);
+  assert.equal(s.grid[s.idx(66, 60)], MAT.SMOKE);
+  assert.ok(!s.grid.includes(MAT.FIRE));
+});
+
+test('held earth intercepts a fireball and protects bodies and objects behind its shape', () => {
+  const s = elementalScene();
+  s.benders.Earth.rock = earthShield();
+  s.remotePlayers.other = { x: 224, y: 164 };
+  const wood = { x: 226, y: 180, mat: MAT.WOOD, vx: 0, vy: 0 };
+  s.debris.push(wood);
+  s.benders.Fire.fireballs.push(fireball(180, 180, 25));
+  s.benders.Fire.updateFireballs(0.12);
+  assert.equal(s.benders.Fire.fireballs.length, 0);
+  assert.equal(s.benders.Earth.rock.cells.length, 7);
+  assert.equal(s.hits.length, 0);
+  assert.equal(s.debris[0], wood);
+  assert.equal(wood.vx, 0);
+  assert.equal(wood.bendBurning, undefined);
+});
+
+test('earth redirects fast water and air attacks while conserving their particles', () => {
+  for (const element of ['Water', 'Air']) {
+    const s = elementalScene();
+    s.benders.Earth.rock = earthShield();
+    const drop = { x: 180, y: 180, vx: 720, vy: 0, age: 0 };
+    s.benders[element].free.push(drop);
+    s.benders[element].updateFree(0.08);
+    assert.equal(s.benders[element].free.length, 1);
+    assert.ok(drop.x < 210 && drop.vx < 0);
+  }
+});
+
+test('moving earth intercepts stationary embers and fireballs and pushes water aside', () => {
+  const s = elementalScene();
+  const rock = earthShield(170);
+  rock.vx = 200;
+  s.benders.Earth.thrown.push(rock);
+  const drop = { x: 200, y: 180, vx: 0, vy: 0 };
+  s.benders.Water.held.push(drop);
+  s.benders.Fire.held.push({ x: 204, y: 180, vx: 0, vy: 0, life: 5 });
+  const ball = fireball(220);
+  s.benders.Fire.fireballs.push(ball);
+  s.benders.Earth.moveRock(rock, 0.2, 'thrown');
+  assert.ok(drop.vx > 0);
+  assert.equal(s.benders.Water.held.length, 1);
+  assert.equal(s.benders.Fire.held.length, 0);
+  assert.equal(ball.earthBlocked, true);
+  s.benders.Fire.updateFireballs(0.01);
+  assert.equal(s.benders.Fire.fireballs.length, 0);
+});
+
+test('earth blocks wind and embers while real gaps in its shape remain open', () => {
+  const s = elementalScene();
+  const rock = earthShield(200);
+  s.benders.Earth.rock = rock;
+  const ember = { x: 215, y: 180, vx: 0, vy: 0, life: 5 };
+  s.benders.Fire.held.push(ember);
+  s.remotePlayers.other = { x: 215, y: 164 };
+  s.benders.Air.gust(180, 180, 60, 180, { x: 1, y: 0 });
+  assert.equal(ember.vx, 0);
+  assert.equal(s.hits.length, 0);
+  assert.ok(rock.vx > 0);
+  s.benders.Fire.free.push({ x: 180, y: 180, vx: 440, vy: 0, age: 0 });
+  s.benders.Fire.updateFree(0.08);
+  assert.equal(s.benders.Fire.free.length, 0);
+  rock.vx = 0;
+  rock.cells = [{ ox: 0, oy: -5 }, { ox: 0, oy: 5 }];
+  s.remotePlayers = {};
+  s.benders.Fire.fireballs.push(fireball());
+  s.benders.Fire.updateFireballs(0.08);
+  assert.equal(s.benders.Fire.fireballs.length, 1);
+  assert.ok(s.benders.Fire.fireballs[0].x > 200);
+});
+
+test('an Earth orbit intercepts attacks at its rotated position after earlier collision checks', () => {
+  const s = elementalScene();
+  s.player.x = 200; s.player.y = 164;
+  s.bodiesInRadius = () => [];
+  const rock = { x: 210, y: 180, vx: 0, vy: 0, cells: [{ ox: 8, oy: 0 }] };
+  s.benders.Earth.rock = rock;
+  s.benders.Water.moveDrop({ x: 234, y: 180, vx: 0, vy: 0 }, 0);
+  s.benders.Earth.steerOrbitRock(Math.PI / (2 * 3.2));
+  s.benders.Fire.free.push({ x: 180, y: 200, vx: 440, vy: 0, age: 0 });
+  s.benders.Fire.updateFree(0.12);
+  assert.equal(s.benders.Fire.free.length, 0);
+});
+
 test('water contact gives other players and enemies a swimming state', () => {
   const s = scene();
   const bend = new WaterBending(s);

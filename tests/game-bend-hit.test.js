@@ -257,9 +257,86 @@ test('Q wheel renders only the four elements and implemented shape/action choice
   s.drawWheelIcon = (_gfx, name) => icons.push(name);
   s.wheelPreviewText = { setVisible() {}, setText(text) { preview = text; } };
   s.drawBendWheel();
-  assert.deepEqual(icons, ['Fire', 'Water', 'Earth', 'Air', 'Bolt', 'Orbit', 'Punch', 'Normal']);
+  assert.deepEqual(icons, ['Fire', 'Water', 'Earth', 'Air', 'Bolt', 'Orbit', 'Punch', 'Normal', 'Flamethrower']);
   assert.match(preview, /Fire \+ Orbit \+ Punch/);
   assert.match(preview, /Radial fire burst/);
+});
+
+test('Q offers distinct actions for each element and remembers their selection', () => {
+  const s = scene();
+  s.bendStyle = { Fire: 'Bolt', Water: 'Bolt', Earth: 'Orbit', Air: 'Bolt' };
+  s.bendAction = { Fire: 'Flamethrower', Water: 'Shield', Earth: 'Spikes', Air: 'Vortex' };
+  s.benders = Object.fromEntries(Object.keys(s.bendStyle).map((name) => [name, { release() {} }]));
+  s.wheelGfx = { clear() {} };
+  s.wheelPreviewText = { setVisible() {} };
+  s.bendElement = 'Fire';
+  for (const [index, actionIndex, name] of [[0, 2, 'Fire'], [1, 3, 'Water'], [2, 3, 'Earth'], [3, 3, 'Air']]) {
+    const before = s.bendAction[name];
+    s.selectBendWheelElement(index);
+    assert.equal(s.bendActionSel, actionIndex);
+    s.closeBendWheel();
+    assert.equal(s.bendAction[name], before);
+  }
+});
+
+test('Q outer ring adapts its choices to the highlighted element', () => {
+  const s = scene();
+  const choices = { Fire: ['Flamethrower'], Water: ['Whip', 'Shield'], Earth: ['Wall', 'Spikes'], Air: ['Dash', 'Vortex'] };
+  const gfx = {};
+  for (const method of ['clear', 'fillStyle', 'beginPath', 'arc', 'closePath', 'fillPath', 'lineStyle', 'strokePath', 'fillCircle']) {
+    gfx[method] = () => gfx;
+  }
+  s.wheelGfx = gfx;
+  s.wheelPreviewText = { setVisible() {}, setText() {} };
+  s.bendFormSel = 0; s.bendActionSel = 2;
+  for (const [index, [element, abilities]] of Object.entries(choices).entries()) {
+    const icons = [];
+    s.bendElementSel = index;
+    s.drawWheelIcon = (_gfx, name) => icons.push(name);
+    s.drawBendWheel();
+    assert.deepEqual(icons.slice(6), ['Punch', 'Normal', ...abilities], element);
+  }
+});
+
+test('RMB dispatches each distinct ability once and suppresses secondary spells', () => {
+  for (const [element, actions] of Object.entries({ Fire: ['Flamethrower'], Water: ['Whip', 'Shield'],
+    Earth: ['Wall', 'Spikes'], Air: ['Dash', 'Vortex'] })) {
+    for (const action of actions) {
+      const s = scene(), invoked = [];
+      s.leftClickMode = 'bend'; s.bendElement = element; s.bendAction = { [element]: action };
+      s.benders = { [element]: { grabRadius: 6, begin() {}, release() {} } };
+      s.bendAbilities = { cast(name) { invoked.push(name); } };
+      s.rightClickMode = 'secondary';
+      s.stopChannel = () => {};
+      s.castWheelSpell = () => assert.fail('selected ability owns RMB');
+      s.prevLeftDown = true; s.prevRightDown = false;
+      s.brushGfx = { clear() { return this; }, lineStyle() { return this; }, strokeCircle() { return this; } };
+      s.input = { activePointer: { worldX: 100, worldY: 100,
+        leftButtonDown: () => true, rightButtonDown: () => true } };
+      s.handlePointer(); s.handlePointer();
+      assert.deepEqual(invoked, [action]);
+    }
+  }
+});
+
+test('ability HUD reports controls, cooldown and resource hints', () => {
+  const s = scene();
+  s.leftClickMode = 'bend'; s.bendElement = 'Earth'; s.bendAction = { Earth: 'Wall' };
+  s.bendAbilities = { remaining: () => 0.8, hintUntil: 1500, hint: 'Gather 9 earth first with LMB' };
+  const label = s.rightButtonLabel(() => 'spell');
+  assert.match(label, /RMB: earth wall/);
+  assert.match(label, /0.8s cooldown/);
+  assert.match(label, /Gather 9 earth/);
+});
+
+test('Air Dash cannot tunnel through a thin wall at high combined movement speed', () => {
+  const s = scene();
+  s.player.impulseX = 560; s.player.bendDashUntil = 2000;
+  s.keys.right = { isDown: true };
+  s.rectSolid = (x, _y, w) => x < 75 && x + w > 72;
+  s.movePlayer(0.05);
+  assert.ok(s.player.x + s.player.w <= 72);
+  assert.equal(s.player.impulseX, 0);
 });
 
 test('right-click does not create material in dig or Normal bending mode', () => {
