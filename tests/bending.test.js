@@ -154,7 +154,8 @@ test('fire ignites fuel and burns touched bodies', () => {
   s.grid[wood] = MAT.WOOD;
   const ember = { x: 40 * PIXEL + 1, y: 40 * PIXEL + 1, vx: 180, vy: 0 };
   assert.equal(bend.moveDrop(ember, 0.02), 'consumed');
-  assert.equal(s.grid[wood], MAT.FIRE);
+  assert.equal(s.grid[wood], MAT.WOOD);
+  assert.ok(bend.surfaceDamage.cells.get(wood).burn > 0);
   bend.held.push({ x: 105, y: 105 }, { x: 145, y: 105 });
   bend.touchBodies();
   assert.equal(s.hits[0][4].burnMs, 1200);
@@ -162,8 +163,204 @@ test('fire ignites fuel and burns touched bodies', () => {
   assert.equal(s.enemies.list[0].burnUntil, 2200);
   s.debris.push({ x: 105, y: 105, mat: MAT.WOOD });
   bend.touchObjects();
+  assert.equal(s.debris.length, 1);
+  assert.equal(s.debris[0].bendBurning, true);
+  s.time.now += 3000;
+  bend.surfaceDamage.update(3);
+  assert.equal(s.grid[wood], MAT.FIRE);
   assert.equal(s.debris.length, 0);
   assert.equal(s.grid[s.idx(35, 35)], MAT.FIRE);
+});
+
+test('weak surface hits erode less than Earth and Air is weaker than Water', () => {
+  const hitsToBreak = (type) => {
+    const s = scene();
+    const bend = type === 'Water' ? new WaterBending(s) : new AirBending(s);
+    const id = s.idx(81, 80);
+    s.grid[id] = MAT.BRICK;
+    let hits = 0;
+    while (s.grid[id] === MAT.BRICK && hits < 100) {
+      s.time.now += 100;
+      bend.moveDrop({ x: 80 * PIXEL + 2, y: 80 * PIXEL + 1, vx: 400, vy: 0 }, 0.01);
+      hits++;
+    }
+    assert.equal(s.grid[id], MAT.EMPTY);
+    return hits;
+  };
+  const s = scene();
+  const earth = new EarthBending(s);
+  s.grid[s.idx(81, 80)] = MAT.BRICK;
+  earth.rockCollides({ x: 80 * PIXEL + 2, y: 80 * PIXEL + 1, vx: 400, vy: 0,
+    cells: Array.from({ length: 4 }, () => ({ ox: 0, oy: 0 })) }, 2, 0, 'thrown');
+  assert.equal(s.grid[s.idx(81, 80)], MAT.EMPTY);
+  const waterHits = hitsToBreak('Water');
+  const airHits = hitsToBreak('Air');
+  assert.ok(waterHits > 1);
+  assert.ok(airHits > waterHits);
+});
+
+test('Water impacts gradually damage loose objects while pushing them', () => {
+  const s = scene();
+  const water = new WaterBending(s);
+  const glass = { x: 105, y: 105, vx: 0, vy: 0, mat: MAT.GLASS };
+  s.debris.push(glass);
+  water.free.push({ x: 105, y: 105, vx: 400, vy: 0, punched: true });
+  water.pushObjects(0.016);
+  assert.equal(s.debris.length, 1);
+  assert.ok(glass.vx > 0);
+  s.time.now += 160;
+  water.pushObjects(0.016);
+  assert.equal(s.debris.length, 0);
+});
+
+test('Fire heats masonry slowly and eventually burns through it', () => {
+  const s = scene();
+  const fire = new FireBending(s);
+  const id = s.idx(80, 80);
+  s.grid[id] = MAT.BRICK;
+  fire.igniteCell(80, 80, 0.16);
+  assert.equal(s.grid[id], MAT.BRICK);
+  for (let i = 0; i < 100 && s.grid[id] === MAT.BRICK; i++) {
+    s.time.now += 100;
+    fire.igniteCell(80, 80, 0.16);
+    fire.surfaceDamage.update(0.1);
+  }
+  assert.equal(s.grid[id], MAT.EMPTY);
+  assert.ok(s.debris.some((d) => d.mat === MAT.BRICK && d.bendCasterSafe));
+});
+
+test('Fire keeps a contacted object burning after the caster stops', () => {
+  const s = scene();
+  const fire = new FireBending(s);
+  const wood = { x: 105, y: 105, vx: 0, vy: 0, mat: MAT.WOOD };
+  s.debris.push(wood);
+  fire.burnDebris(105, 105, 10);
+  assert.equal(s.debris.length, 1);
+  assert.equal(wood.bendBurning, true);
+  for (let i = 0; i < 30; i++) {
+    s.time.now += 100;
+    fire.update(0.1);
+  }
+  assert.equal(s.debris.length, 0);
+  assert.equal(s.grid[s.idx(35, 35)], MAT.FIRE);
+});
+
+test('Water contact quenches burning debris and standing water quenches burning terrain', () => {
+  const s = scene();
+  const fire = new FireBending(s);
+  const water = new WaterBending(s);
+  assert.equal(fire.surfaceDamage, water.surfaceDamage);
+  const wood = { x: 105, y: 105, vx: 0, vy: 0, mat: MAT.WOOD };
+  s.debris.push(wood);
+  fire.burnDebris(105, 105, 10);
+  s.grid[s.idx(80, 80)] = MAT.WOOD;
+  fire.igniteCell(80, 80);
+  fire.surfaceDamage.update(0.5);
+  water.held.push({ x: 105, y: 105, vx: 0, vy: 0 });
+  water.pushObjects(0.016);
+  s.grid[s.idx(79, 80)] = MAT.WATER;
+  s.time.now += 3000;
+  fire.surfaceDamage.update(3);
+  assert.equal(s.debris.includes(wood), true);
+  assert.equal(wood.bendBurning, false);
+  assert.equal(s.grid[s.idx(80, 80)], MAT.WOOD);
+});
+
+test('Fire cannot maintain a burn on material cooled by nearby water', () => {
+  const s = scene();
+  const fire = new FireBending(s);
+  s.grid[s.idx(80, 80)] = MAT.WOOD;
+  s.grid[s.idx(79, 80)] = MAT.WATER;
+  for (let i = 0; i < 50; i++) {
+    s.time.now += 100;
+    fire.igniteCell(80, 80);
+    fire.surfaceDamage.update(0.1);
+  }
+  assert.equal(s.grid[s.idx(80, 80)], MAT.WOOD);
+  assert.equal(fire.surfaceDamage.cells.get(s.idx(80, 80)).burn, 0);
+});
+
+test('a burning object retains its wear when it settles back into terrain', () => {
+  const s = scene();
+  const fire = new FireBending(s);
+  const wood = { x: 105, y: 105, mat: MAT.WOOD, variant: 2 };
+  s.debris.push(wood);
+  fire.burnDebris(105, 105, 10);
+  fire.surfaceDamage.update(0.5);
+  s.setCell(s.idx(35, 35), MAT.WOOD, 2);
+  fire.surfaceDamage.settleObject(wood, 35, 35);
+  s.debris.length = 0;
+  s.time.now += 3000;
+  fire.surfaceDamage.update(3);
+  assert.equal(s.grid[s.idx(35, 35)], MAT.FIRE);
+});
+
+test('Air pushes bent rocks and loose pieces, with heavier rocks resisting more', () => {
+  const s = scene();
+  const earth = new EarthBending(s);
+  const air = new AirBending(s);
+  const light = { x: 100, y: 100, vx: 0, vy: 0, cells: [{ ox: 0, oy: 0 }] };
+  const heavy = { x: 100, y: 100, vx: 0, vy: 0,
+    cells: Array.from({ length: 16 }, () => ({ ox: 0, oy: 0 })) };
+  earth.thrown.push(light, heavy);
+  earth.loosePieces.push({ x: 100, y: 100, vx: 0, vy: 0, mat: MAT.STONE, age: 0 });
+  s.benders = { Earth: earth };
+  air.gust(80, 100, 50, 100, { x: 1, y: 0 });
+  assert.ok(light.vx > heavy.vx && heavy.vx > 0);
+  assert.ok(earth.loosePieces[0].vx > 0);
+  earth.updateLoose(0.02);
+  assert.ok(earth.loosePieces[0].x > 100);
+});
+
+test('Air lightly damages objects and cannot push rocks through a wall', () => {
+  const s = scene();
+  const air = new AirBending(s);
+  const wood = { x: 100, y: 100, vx: 0, vy: 0, mat: MAT.WOOD };
+  s.debris.push(wood);
+  air.gust(80, 100, 50, 100, { x: 1, y: 0 });
+  assert.ok(wood.vx > 0);
+  assert.equal(s.debris.length, 1);
+  assert.ok(air.surfaceDamage.objects.get(wood).damage > 0);
+  const rock = { x: 100, y: 100, vx: 0, vy: 0, cells: [{ ox: 0, oy: 0 }] };
+  s.benders = { Earth: { rock, thrown: [], loosePieces: [] } };
+  s.grid[s.idx(30, 33)] = MAT.STONE;
+  air.gust(80, 100, 50, 100, { x: 1, y: 0 });
+  assert.equal(rock.vx, 0);
+});
+
+test('Air deflects a held Earth orbit while its tether pulls it toward the caster', () => {
+  const s = scene();
+  const earth = new EarthBending(s);
+  const air = new AirBending(s);
+  s.bodiesInRadius = () => [];
+  s.benders = { Earth: earth };
+  earth.form = 'Orbit';
+  earth.rock = { x: 30, y: 36, vx: 0, vy: 0, cells: [{ ox: 0, oy: 0 }] };
+  air.gust(20, 36, 50, 100, { x: 1, y: 0 });
+  earth.steerOrbitRock(0.02);
+  assert.ok(earth.rock.x > s.player.x + s.player.w / 2);
+  for (let i = 0; i < 100; i++) earth.steerOrbitRock(0.02);
+  assert.ok(Math.abs(earth.rock.x - 30) < 0.02);
+});
+
+test('weaker elements respect bedrock and bound accumulated surface wear', () => {
+  const s = scene();
+  const water = new WaterBending(s);
+  const fire = new FireBending(s);
+  const air = new AirBending(s);
+  s.grid[s.idx(80, 80)] = MAT.BEDROCK;
+  water.erodeSurface({ vx: 720, vy: 0 }, 80 * PIXEL, 80 * PIXEL);
+  fire.igniteCell(80, 80, 1000);
+  air.erodeSurface({ vx: 790, vy: 0 }, 80 * PIXEL, 80 * PIXEL);
+  assert.equal(s.grid[s.idx(80, 80)], MAT.BEDROCK);
+  for (let i = 0; i < 1100; i++) {
+    const gx = 100 + i % 100, gy = 100 + Math.floor(i / 100);
+    s.grid[s.idx(gx, gy)] = MAT.STONE;
+    fire.igniteCell(gx, gy, 0.08);
+  }
+  assert.ok(fire.surfaceDamage.cells.size <= 1024);
+  fire.surfaceDamage.clear();
+  assert.equal(fire.surfaceDamage.cells.size, 0);
 });
 
 test('earth breaks light terrain and strikes bodies', () => {
@@ -477,7 +674,7 @@ test('orbit strikes do not knock the caster back', () => {
   assert.equal(args[6], true);
 });
 
-test('Bolt Punch turns held embers into a travelling fireball that hits and ignites', () => {
+test('Bolt Punch turns held embers into a fireball that blasts objects on impact and ignites', () => {
   const s = scene();
   s.remotePlayers.other = { x: 115, y: 20 };
   s.input.activePointer = { worldX: 200, worldY: 36 };
@@ -494,6 +691,80 @@ test('Bolt Punch turns held embers into a travelling fireball that hits and igni
   assert.ok(s.grid.includes(MAT.FIRE));
   assert.ok(s.visualFx.some((e) => e[0] === 'ring'));
   assert.equal(s.selfHits.length, 0);
+});
+
+test('fireball explosions chip brick immediately, throw rubble, and leave a bounded crater', () => {
+  const s = scene();
+  for (let y = 35; y <= 45; y++) {
+    for (let x = 40; x <= 45; x++) s.grid[s.idx(x, y)] = MAT.BRICK;
+  }
+  const fire = new FireBending(s);
+  fire.impactFireball({ x: 121.5, y: 121.5, vx: 440, vy: 0, size: 9, mass: 25 });
+  assert.equal(s.grid[s.idx(40, 40)], MAT.FIRE);
+  assert.equal(s.grid[s.idx(41, 40)], MAT.BRICK);
+  assert.equal(s.grid[s.idx(45, 40)], MAT.BRICK);
+  assert.ok(s.debris.some((obj) => obj.mat === MAT.BRICK && Math.hypot(obj.vx, obj.vy) > 0));
+  assert.ok(s.debris.every((obj) => obj.bendCasterSafe));
+  assert.equal(s.collapseTimer, 30);
+  assert.equal(s.selfHits.length, 0);
+});
+
+test('larger fireballs break tougher ground while small fireballs only weaken it', () => {
+  const impact = (mass) => {
+    const s = scene();
+    s.grid[s.idx(40, 40)] = MAT.STONE;
+    const fire = new FireBending(s);
+    fire.impactFireball({ x: 121.5, y: 121.5, vx: 440, vy: 0, size: 10, mass });
+    return s;
+  };
+  assert.equal(impact(1).grid[40 + 40 * COLS], MAT.STONE);
+  assert.equal(impact(100).grid[40 + 40 * COLS], MAT.FIRE);
+});
+
+test('fireball blasts weaken and push surviving objects, which keep burning, with distance falloff', () => {
+  const s = scene();
+  const near = { x: 127.5, y: 121.5, mat: MAT.STONE, vx: 0, vy: 0 };
+  const edge = { x: 145.5, y: 121.5, mat: MAT.WOOD, vx: 0, vy: 0 };
+  const outside = { x: 181.5, y: 121.5, mat: MAT.WOOD, vx: 0, vy: 0 };
+  s.debris.push(near, edge, outside);
+  const fire = new FireBending(s);
+  fire.impactFireball({ x: 121.5, y: 121.5, vx: 440, vy: 0, size: 9, mass: 25 });
+  assert.ok(s.debris.includes(near) && near.vx > edge.vx && edge.vx > 0);
+  assert.ok(near.vy < 0 && edge.bendBurning);
+  assert.equal(outside.vx, 0);
+  assert.equal(outside.bendBurning, undefined);
+  s.time.now += 3000;
+  fire.surfaceDamage.update(3);
+  assert.ok(!s.debris.includes(edge));
+  assert.ok(s.debris.includes(near) && s.debris.includes(outside));
+});
+
+test('bedrock absorbs fireball blast damage and shields loose objects behind it', () => {
+  const s = scene();
+  for (let y = 25; y < 55; y++) s.grid[s.idx(41, y)] = MAT.BEDROCK;
+  const shielded = { x: 130.5, y: 121.5, mat: MAT.WOOD, vx: 0, vy: 0 };
+  s.debris.push(shielded);
+  const fire = new FireBending(s);
+  fire.impactFireball({ x: 121.5, y: 121.5, vx: 440, vy: 0, size: 14, mass: 120 });
+  assert.equal(s.grid[s.idx(41, 40)], MAT.BEDROCK);
+  assert.ok(s.debris.includes(shielded));
+  assert.equal(shielded.vx, 0);
+  assert.equal(shielded.bendBurning, undefined);
+});
+
+test('doused fireballs create steam effects without blast damage or impulse', () => {
+  const s = scene();
+  s.grid[s.idx(40, 40)] = MAT.WOOD;
+  const obj = { x: 123, y: 121.5, mat: MAT.WOOD, vx: 0, vy: 0 };
+  s.debris.push(obj);
+  const fire = new FireBending(s);
+  fire.impactFireball({ x: 121.5, y: 121.5, vx: 440, vy: 0, size: 14, mass: 120 }, true);
+  assert.equal(s.grid[s.idx(40, 40)], MAT.WOOD);
+  assert.equal(s.debris[0], obj);
+  assert.equal(obj.vx, 0);
+  assert.equal(s.cellWrites.length, 0);
+  assert.equal(s.hits.length, 0);
+  assert.ok(s.visualFx.some((e) => e[0] === 'burst' && e[4] === 'Water'));
 });
 
 test('Bolt Punch keeps its embers visible and sheds fire along its flight', () => {
@@ -540,6 +811,10 @@ test('Orbit Punch sends the held embers in all directions', () => {
   assert.ok(fire.free.some((d) => d.vy > 0));
   assert.ok(fire.free.some((d) => d.vy < 0));
   assert.ok(fire.free.every((d) => (d.x - 30) * d.vx + (d.y - 36) * d.vy > 0));
+  assert.equal(s.debris.length, 1);
+  assert.equal(s.debris[0].bendBurning, true);
+  s.time.now += 3000;
+  fire.surfaceDamage.update(3);
   assert.equal(s.debris.length, 0);
   assert.ok(s.visualFx.some((e) => e[0] === 'shockwave'));
   assert.equal(s.selfHits.length, 0);

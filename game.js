@@ -341,6 +341,7 @@ class SandScene extends Phaser.Scene {
   }
 
   setCell(id, mat, customLife) {
+    this.bendingDamage?.invalidateCell(id);
     this.world.setCell(id, mat, customLife);
 
     // In multiplayer, every concrete change is recorded and shipped to the server.
@@ -371,6 +372,7 @@ class SandScene extends Phaser.Scene {
   // ---------- world (rules live in world.js) ----------
 
   generateWorld(seed) {
+    this.bendingDamage?.clear();
     const info = PixelWorld.generateWorld(this.world, seed, { bodyScale: CHAR_SCALE, stepUpCells: STEP_UP_CELLS });
     this.world.onRigidImpact = (hit) => {
       if (!this.multiplayer) this.handleRigidFallImpact(hit);
@@ -1358,7 +1360,7 @@ class SandScene extends Phaser.Scene {
     }
     intersections.sort((a, b) => a.entry - b.entry);
     for (const { body } of intersections) {
-      if (body.self && d.earthImpactSource) continue;
+      if (body.self && (d.earthImpactSource || d.bendCasterSafe)) continue;
       if (body.self && d.tkThrown > 0 && d.tkArm > 0) continue;
       const thrownHit = d.tkThrown > 0 && speed > 160 && IS_SOLID[d.mat];
       const amount = Math.max(baseDamage, thrownHit ? d.tkThrown : 0);
@@ -1384,6 +1386,7 @@ class SandScene extends Phaser.Scene {
     const id = this.idx(gx, gy);
     if (this.grid[id] === BEDROCK) return;
     this.setCell(id, d.mat, d.variant);
+    this.bendingDamage?.settleObject(d, gx, gy);
     this.sendNet({ t: 'settle', gx, gy, mat: d.mat });
   }
 
