@@ -1235,11 +1235,11 @@ class SandScene extends Phaser.Scene {
   }
 
   spawnDebris(x, y, mat, centerX, centerY, explosive) {
-    if (this.debris.length > 80) return;
+    if (this.debris.length >= 80) return;
     const dx = x - centerX, dy = y - centerY;
     const dist = Math.max(1, Math.hypot(dx, dy));
     const baseSpeed = explosive ? Phaser.Math.Between(120, 260) : Phaser.Math.Between(30, 90);
-    this.debris.push({
+    const debris = {
       x: x * PIXEL + PIXEL / 2,
       y: y * PIXEL + PIXEL / 2,
       vx: (dx / dist) * baseSpeed + Phaser.Math.Between(-30, 30),
@@ -1252,7 +1252,9 @@ class SandScene extends Phaser.Scene {
       bounces: 2,
       impactArmed: !this.fallingPointOverlapsBody(x * PIXEL + PIXEL / 2, y * PIXEL + PIXEL / 2, PIXEL * 0.8),
       impactContacts: new Set(),
-    });
+    };
+    this.debris.push(debris);
+    return debris;
   }
 
   fallingBodies() {
@@ -1356,6 +1358,7 @@ class SandScene extends Phaser.Scene {
     }
     intersections.sort((a, b) => a.entry - b.entry);
     for (const { body } of intersections) {
+      if (body.self && d.earthImpactSource) continue;
       if (body.self && d.tkThrown > 0 && d.tkArm > 0) continue;
       const thrownHit = d.tkThrown > 0 && speed > 160 && IS_SOLID[d.mat];
       const amount = Math.max(baseDamage, thrownHit ? d.tkThrown : 0);

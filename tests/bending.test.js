@@ -27,9 +27,11 @@ function scene() {
   const selfHits = [];
   const casterFx = [];
   const visualFx = [];
+  const cellWrites = [];
   const grid = new Uint8Array(COLS * ROWS);
   return {
-    hits, damage, selfHits, casterFx, visualFx, grid, life: new Uint8Array(grid.length),
+    hits, damage, selfHits, casterFx, visualFx, cellWrites, grid, life: new Uint8Array(grid.length),
+    collapseTimer: 120,
     time: { now: 1000 },
     player: { x: 20, y: 20, w: 20, h: 32 },
     remotePlayers: { other: { x: 100, y: 100 } },
@@ -45,10 +47,22 @@ function scene() {
       streaks(...args) { visualFx.push(['streaks', ...args]); },
       smoke(...args) { visualFx.push(['smoke', ...args]); },
       hitstop(...args) { visualFx.push(['hitstop', ...args]); },
-      shards() {}, shake() {},
+      shards(...args) { visualFx.push(['shards', ...args]); },
+      shake() {},
     },
     idx(x, y) { return y * COLS + x; },
-    setCell(id, mat) { grid[id] = mat; },
+    setCell(id, mat, life = 0) {
+      grid[id] = mat;
+      this.life[id] = life;
+      cellWrites.push([id, mat, life]);
+    },
+    spawnDebris(x, y, mat) {
+      if (this.debris.length >= 80) return;
+      const chunk = { x: x * PIXEL + PIXEL / 2, y: y * PIXEL + PIXEL / 2,
+        vx: 0, vy: 0, mat, variant: this.life[this.idx(x, y)] };
+      this.debris.push(chunk);
+      return chunk;
+    },
     reportHit(...args) { hits.push(args); },
     damageEnemy(...args) { damage.push(args); },
     receiveHit(msg) { selfHits.push(msg); },
@@ -162,9 +176,10 @@ test('earth breaks light terrain and strikes bodies', () => {
   assert.equal(bend.rockCollides(rock, 3, 0, 'thrown'), false);
   assert.equal(s.grid[glass], MAT.EMPTY);
   rock.x = 105; rock.y = 105;
-  s.debris.push({ x: 105, y: 105, mat: MAT.GLASS, vx: 0, vy: 0 });
+  const glassObject = { x: 105, y: 105, mat: MAT.GLASS, vx: 0, vy: 0 };
+  s.debris.push(glassObject);
   bend.strikeBodies(rock);
-  assert.equal(s.debris.length, 0);
+  assert.equal(s.debris.includes(glassObject), false);
   assert.equal(s.hits[0][1], 'Earth');
   assert.ok(s.hits[0][2] > 0);
   rock.x = 145;
@@ -207,6 +222,171 @@ test('Earth Orbit Punch sends conserved stone fragments outward', () => {
   bend.updateThrown(0.08);
   assert.equal(s.hits[0][1], 'Earth');
   assert.equal(s.selfHits.length, 0);
+});
+
+function fracturePatch(mat, mass, speed) {
+  const s = scene();
+  for (let y = 60; y <= 100; y++) {
+    for (let x = 80; x <= 110; x++) {
+      const id = s.idx(x, y);
+      s.grid[id] = mat;
+      s.life[id] = 3;
+    }
+  }
+  const bend = new EarthBending(s);
+  const rock = { x: 79 * PIXEL + 1, y: 80 * PIXEL + 1, vx: speed, vy: 0,
+    cells: Array.from({ length: mass }, () => ({ ox: 0, oy: 0, shade: 0 })) };
+  const broken = bend.crumbleTerrain(rock, [{ x: 80, y: 80 }]);
+  return { s, bend, rock, broken };
+}
+
+test('Earth crater damage increases with rock mass and speed', () => {
+  const small = fracturePatch(MAT.DIRT, 4, 200);
+  const large = fracturePatch(MAT.DIRT, 64, 200);
+  const slow = fracturePatch(MAT.DIRT, 16, 200);
+  const fast = fracturePatch(MAT.DIRT, 16, 400);
+  assert.ok(large.broken > small.broken);
+  assert.ok(fast.broken > slow.broken);
+  assert.ok(fast.rock.vx < 400);
+  assert.equal(fast.rock.cells.length, 16);
+});
+
+test('Earth impacts crumble ground and masonry according to their resistance', () => {
+  const dirt = fracturePatch(MAT.DIRT, 64, 400);
+  const brick = fracturePatch(MAT.BRICK, 64, 400);
+  const stone = fracturePatch(MAT.STONE, 64, 400);
+  assert.ok(dirt.broken > brick.broken);
+  assert.ok(brick.broken > stone.broken);
+  assert.ok(stone.broken > 0);
+  assert.ok(brick.s.debris.length > 0 && brick.s.debris.length <= 20);
+  assert.ok(brick.s.debris.every((d) => d.mat === MAT.BRICK && d.variant === 3));
+  assert.equal(brick.s.cellWrites.length, brick.broken);
+  assert.ok(brick.s.cellWrites.every(([id, mat]) => mat === MAT.EMPTY
+    && brick.s.grid[id] === MAT.EMPTY));
+  assert.equal(brick.s.collapseTimer, 30);
+  assert.ok(brick.s.visualFx.some((fx) => fx[0] === 'smoke'));
+});
+
+test('Earth moving-rock collisions carve a crater and leave moving rubble', () => {
+  const { s, bend } = fracturePatch(MAT.WOOD, 1, 0);
+  const rock = { x: 78 * PIXEL + 1.5, y: 80 * PIXEL + 1.5, vx: 550, vy: 0,
+    cells: bend.slots.slice(0, 16).map(([ox, oy]) => ({ ox, oy, shade: 0 })) };
+  bend.moveRock(rock, 0.033, 'thrown');
+  assert.ok(s.cellWrites.length > 0);
+  assert.ok(s.debris.some((d) => d.vx > 0));
+  assert.ok(s.debris.some((d) => d.earthImpactSource === rock));
+  assert.ok(rock.vx < 550);
+});
+
+test('a downward Earth impact crumbles soil instead of merely landing on it', () => {
+  const s = scene();
+  for (let y = 84; y <= 108; y++) {
+    for (let x = 60; x <= 100; x++) s.grid[s.idx(x, y)] = MAT.DIRT;
+  }
+  const bend = new EarthBending(s);
+  const rock = { x: 80 * PIXEL + 1.5, y: 80 * PIXEL + 1.5, vx: 0, vy: 550,
+    cells: bend.slots.slice(0, 16).map(([ox, oy]) => ({ ox, oy, shade: 0 })) };
+  bend.moveRock(rock, 0.033, 'thrown');
+  assert.ok(s.cellWrites.length > 0);
+  assert.ok(s.cellWrites.every(([id]) => Math.floor(id / COLS) >= 84));
+  assert.ok(rock.vy < 550);
+});
+
+test('Earth Orbit can fracture a structure at its rotating contact speed', () => {
+  const s = scene();
+  s.bodiesInRadius = () => [];
+  s.grid[s.idx(19, 15)] = MAT.WOOD;
+  const bend = new EarthBending(s);
+  bend.form = 'Orbit';
+  bend.rock = { x: 30, y: 36, vx: 0, vy: 0, cells: Array.from({ length: 16 }, (_, i) => {
+    const angle = i * Math.PI * 2 / 16;
+    return { ox: Math.cos(angle) * 10, oy: Math.sin(angle) * 10, shade: 0 };
+  }) };
+  bend.steerOrbitRock(0.1);
+  assert.equal(s.grid[s.idx(19, 15)], MAT.EMPTY);
+  assert.ok(s.debris.length > 0);
+  assert.equal(s.selfHits.length, 0);
+});
+
+test('Earth cannot crumble bedrock or excavate with a resting rock', () => {
+  const bedrock = fracturePatch(MAT.BEDROCK, 160, 1000);
+  assert.equal(bedrock.broken, 0);
+  assert.equal(bedrock.s.cellWrites.length, 0);
+  const slow = fracturePatch(MAT.WOOD, 160, 10);
+  assert.equal(slow.broken, 0);
+  const rock = { x: 79 * PIXEL + 1.5, y: 80 * PIXEL + 1.5, vx: 10, vy: 0,
+    cells: [{ ox: 0, oy: 0 }] };
+  assert.equal(slow.bend.rockCollides(rock, PIXEL, 0, 'thrown'), true);
+});
+
+test('a bedrock barrier stops an Earth rock without damaging terrain behind it', () => {
+  const s = scene();
+  const bend = new EarthBending(s);
+  const rock = { x: 79 * PIXEL + 1, y: 80 * PIXEL + 1, vx: 700, vy: 0,
+    cells: Array.from({ length: 64 }, () => ({ ox: 0, oy: 0 })) };
+  s.grid[s.idx(80, 80)] = MAT.BEDROCK;
+  s.grid[s.idx(81, 80)] = MAT.DIRT;
+  assert.equal(bend.rockCollides(rock, PIXEL, 0, 'thrown'), true);
+  assert.equal(s.grid[s.idx(80, 80)], MAT.BEDROCK);
+  assert.equal(s.grid[s.idx(81, 80)], MAT.DIRT);
+  assert.equal(s.cellWrites.length, 0);
+});
+
+test('Earth fractures begin at a real contact when touched surfaces are separated', () => {
+  const s = scene();
+  s.grid[s.idx(80, 80)] = MAT.WOOD;
+  s.grid[s.idx(100, 80)] = MAT.WOOD;
+  const bend = new EarthBending(s);
+  const broken = bend.crumbleTerrain({ x: 79 * PIXEL, y: 80 * PIXEL, vx: 400, vy: 0,
+    cells: Array.from({ length: 8 }, () => ({ ox: 0, oy: 0 })) },
+  [{ x: 80, y: 80 }, { x: 100, y: 80 }]);
+  assert.ok(broken > 0);
+});
+
+test('Earth loose-object damage depends on mass and speed', () => {
+  const crush = (mass, speed, mat = MAT.WOOD) => {
+    const s = scene();
+    const bend = new EarthBending(s);
+    const obj = { x: 105, y: 105, mat, vx: 0, vy: 0 };
+    s.debris.push(obj);
+    const rock = { x: 105, y: 105, vx: speed, vy: 0,
+      cells: Array.from({ length: mass }, () => ({ ox: 0, oy: 0 })) };
+    bend.strikeObjects(rock, [{ x: 105, y: 105 }], speed);
+    return { s, obj };
+  };
+  const weak = crush(1, 150);
+  assert.equal(weak.s.debris.length, 1);
+  assert.ok(weak.obj.vx > 0);
+  assert.equal(crush(8, 150).s.debris.length, 0);
+  assert.equal(crush(1, 350).s.debris.length, 0);
+  assert.equal(crush(160, 1000, MAT.BEDROCK).s.debris.length, 1);
+});
+
+test('Earth fracture work stays bounded during a very large impact', () => {
+  const { broken, s } = fracturePatch(MAT.DIRT, 160, 5000);
+  assert.ok(broken > 100 && broken <= 300);
+  assert.ok(s.debris.length <= 20);
+});
+
+test('crumbling a house support makes the remaining structure collapse', () => {
+  const s = scene();
+  const world = new PixelWorld.World();
+  s.grid = world.grid;
+  s.life = world.life;
+  s.setCell = (id, mat, life) => world.setCell(id, mat, life);
+  for (let y = 82; y < ROWS - 1; y++) world.setCell(s.idx(80, y), MAT.STONE);
+  world.setCell(s.idx(80, ROWS - 1), MAT.BEDROCK);
+  world.setCell(s.idx(80, 81), MAT.WOOD);
+  for (let x = 78; x <= 82; x++) world.setCell(s.idx(x, 80), MAT.BRICK);
+  world.checkStructuralSupport();
+  assert.equal(world.falling[s.idx(78, 80)], 0);
+  const bend = new EarthBending(s);
+  bend.crumbleTerrain({ x: 79 * PIXEL, y: 81 * PIXEL, vx: 400, vy: 0,
+    cells: [{ ox: 0, oy: 0 }] }, [{ x: 80, y: 81 }]);
+  assert.equal(world.grid[s.idx(80, 81)], MAT.EMPTY);
+  world.checkStructuralSupport();
+  assert.equal(world.grid[s.idx(78, 80)], MAT.BRICK);
+  assert.equal(world.falling[s.idx(78, 80)], 1);
 });
 
 test('air preserves enemy push and relays player push', () => {

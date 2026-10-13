@@ -131,6 +131,17 @@
     NAMES[m] = d.name;
   }
 
+  // Fracture cost per pixel, in units of a one-cell rock travelling at 200 px/s.
+  // Bedrock and non-solid materials have no destructible impact surface.
+  const IMPACT_RESISTANCE = new Float32Array(MAT_COUNT);
+  IMPACT_RESISTANCE.fill(Infinity);
+  for (const [mat, resistance] of [
+    [LEAVES, 0.15], [SNOW, 0.25], [SAND, 0.3], [GLASS, 0.4],
+    [GRASS, 0.6], [DIRT, 0.9], [ICE, 1.2], [PACKED_ICE, 1.4],
+    [WOOD, 1.6], [TIMBER, 1.8], [SANDSTONE, 2.4], [COAL, 2.4],
+    [BRICK, 3.2], [STONE, 4.8], [GOLD, 7.2],
+  ]) IMPACT_RESISTANCE[mat] = resistance;
+
   const moveTable = (...mats) => {
     const t = new Uint8Array(MAT_COUNT);
     for (const m of mats) t[m] = 1;
@@ -2084,6 +2095,7 @@
   return {
     COLS, ROWS, SIZE, MAT, MAT_COUNT, FIRE_LIFE, SMOKE_LIFE, ICE_LIFE, BG, V, DEFAULT_BODY_SCALE,
     IS_SOLID, BLOCKS_BODY, IS_RIGID, IS_OPEN, IS_LIQUID, FLAMMABILITY, BURN_LIFE, ACID_RATE, PALETTE, NAMES,
+    IMPACT_RESISTANCE,
     World, generateWorld, buildBackdrop, segmentRectEntry, segmentEntersRect, impactDamage,
   };
 });

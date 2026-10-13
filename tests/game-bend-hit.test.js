@@ -89,6 +89,22 @@ test('orbit knockback can spare the caster', () => {
   assert.equal(s.player.vy, 0);
 });
 
+test('rubble from Earth bending spares its caster while hitting other bodies', () => {
+  const s = scene();
+  const damaged = [];
+  const enemy = { x: 90, y: 50, w: 20, h: 32 };
+  s.fallingBodies = () => [
+    { key: 'self', target: s.player, self: true, x: 50, y: 50, w: 20, h: 32 },
+    { key: 'enemy', target: enemy, enemy: true, ...enemy },
+  ];
+  s.clipFallingSweep = (_fromX, _fromY, x, y) => ({ x, y });
+  s.applyFallingBodyDamage = (body) => { damaged.push(body.key); return true; };
+  s.handleDebrisImpact({ x: 120, y: 60, mat: PixelWorld.MAT.STONE,
+    vx: 600, vy: 0, impactArmed: true, impactContacts: new Set(),
+    earthImpactSource: {} }, 40, 60, 600);
+  assert.deepEqual(damaged, ['enemy']);
+});
+
 test('fire spells emit particles from the caster on cast and while channeling', () => {
   const s = scene();
   const bursts = [];

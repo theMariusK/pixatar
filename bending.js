@@ -540,6 +540,11 @@ const EARTH_BEND = {
   FOOTING: 3,           // rows under the bender's feet that are never lifted
   PUNCH_SPEED: 690,     // focused rock strike
   FRAGMENT_SPEED: 470,  // stone fragments from Orbit Punch
+  MIN_IMPACT_SPEED: 65, // resting rocks cannot excavate terrain
+  IMPACT_SPEED_SCALE: 200,
+  MAX_CRUMBLE_RADIUS: 16, // cells; limits the work done by one impact
+  MAX_CRUMBLE_CELLS: 300,
+  CRUMBLE_DEBRIS: 20,
 };
 
 class EarthBending {
@@ -693,22 +698,111 @@ class EarthBending {
   }
 
   strikeObjects(rock, points, speed) {
-    if (speed < 85) return;
+    const energy = this.impactEnergy(rock, speed);
+    if (!energy) return;
     const s = this.scene;
-    const M = PixelWorld.MAT;
+    let spent = 0;
     for (let i = s.debris.length - 1; i >= 0; i--) {
       const d = s.debris[i];
+      if (d.earthImpactSource === (rock.impactSource || rock)
+        && s.time.now < d.earthImpactUntil) continue;
       if (!points.some((p) => Math.hypot(p.x - d.x, p.y - d.y) < PIXEL * 2.5)) continue;
       if (!bendHitReady(this.hitCooldowns, d, s.time.now, 180)) continue;
-      if (d.mat === M.GLASS || d.mat === M.LEAVES || d.mat === M.SNOW
-        || (rock.cells.length >= 6 && (d.mat === M.WOOD || d.mat === M.TIMBER))) {
+      const resistance = PixelWorld.IMPACT_RESISTANCE[d.mat];
+      if (!Number.isFinite(resistance)) continue;
+      if (energy - spent >= resistance) {
         s.debris.splice(i, 1);
+        spent += resistance;
         s.fx.shards(d.x, d.y, 4, 'Earth');
       } else {
-        d.vx += rock.vx * 0.5;
-        d.vy += rock.vy * 0.5 - 40;
+        const transfer = Math.min(0.65, Math.sqrt(rock.cells.length) * 0.15);
+        d.vx += rock.vx * transfer;
+        d.vy += rock.vy * transfer - 25;
       }
     }
+    if (spent) this.spendImpactEnergy(rock, spent, energy);
+  }
+
+  impactEnergy(rock, speed = Math.hypot(rock.vx, rock.vy)) {
+    if (speed < EARTH_BEND.MIN_IMPACT_SPEED) return 0;
+    return rock.cells.length * (speed / EARTH_BEND.IMPACT_SPEED_SCALE) ** 2;
+  }
+
+  spendImpactEnergy(rock, spent, energy) {
+    const retained = Math.sqrt(Math.max(0, 1 - spent / energy));
+    rock.vx *= retained;
+    rock.vy *= retained;
+  }
+
+  // Fracture spreads from actual contact pixels through connected material.
+  // Its finite energy budget buys fewer pixels in masonry than in soil or wood.
+  // Every broken pixel consumes momentum, so penetration is also finite.
+  crumbleTerrain(rock, contacts) {
+    const energy = this.impactEnergy(rock);
+    if (!energy || !contacts.length) return 0;
+    const s = this.scene;
+    const radius = Math.min(EARTH_BEND.MAX_CRUMBLE_RADIUS,
+      Math.max(1, Math.ceil(Math.cbrt(energy) * 0.7 + Math.sqrt(rock.cells.length) * 0.14)));
+    const meanX = contacts.reduce((sum, c) => sum + c.x, 0) / contacts.length;
+    const meanY = contacts.reduce((sum, c) => sum + c.y, 0) / contacts.length;
+    // A hollow or orbiting rock can touch opposite sides of an empty gap.
+    // Anchor the crater on a real contact instead of the air between them.
+    const center = contacts.reduce((best, c) =>
+      Math.hypot(c.x - meanX, c.y - meanY) < Math.hypot(best.x - meanX, best.y - meanY) ? c : best);
+    const cx = center.x, cy = center.y;
+    const queue = [];
+    const seen = new Set();
+    const enqueue = (x, y) => {
+      if (x <= 0 || x >= COLS - 1 || y <= 0 || y >= ROWS - 1) return;
+      const distance2 = (x - cx) ** 2 + (y - cy) ** 2;
+      if (distance2 > radius * radius) return;
+      const id = s.idx(x, y);
+      if (seen.has(id) || !IS_SOLID[s.grid[id]]) return;
+      seen.add(id);
+      queue.push({ x, y, id, distance2 });
+    };
+    for (const contact of contacts) enqueue(contact.x, contact.y);
+    let spent = 0, broken = 0, chunks = 0;
+    const budget = energy * 0.7;
+    for (let head = 0; head < queue.length && broken < EARTH_BEND.MAX_CRUMBLE_CELLS; head++) {
+      const cell = queue[head];
+      const mat = s.grid[cell.id];
+      const cost = PixelWorld.IMPACT_RESISTANCE[mat]
+        * (1 + cell.distance2 / (radius * radius) * 0.8);
+      if (!Number.isFinite(cost) || spent + cost > budget) continue;
+      // Spawn before clearing: the cell's palette variant belongs to the rubble.
+      if (chunks < EARTH_BEND.CRUMBLE_DEBRIS) {
+        const debris = s.spawnDebris(cell.x, cell.y, mat, cx, cy, true);
+        if (debris) {
+          debris.vx = rock.vx * 0.22 + (cell.x - cx) * 14;
+          debris.vy = rock.vy * 0.12 + (cell.y - cy) * 14 - 80;
+          debris.earthImpactSource = rock.impactSource || rock;
+          debris.earthImpactUntil = s.time.now + 160;
+          chunks++;
+        }
+      }
+      s.setCell(cell.id, EMPTY);
+      spent += cost;
+      broken++;
+      enqueue(cell.x - 1, cell.y);
+      enqueue(cell.x + 1, cell.y);
+      enqueue(cell.x, cell.y - 1);
+      enqueue(cell.x, cell.y + 1);
+    }
+    if (!broken) return 0;
+    this.spendImpactEnergy(rock, spent, energy);
+    // Queue one support pass rather than scanning the whole world per fragment.
+    if (!s.multiplayer) s.collapseTimer = Math.min(s.collapseTimer ?? 120, 30);
+    const x = cx * PIXEL + PIXEL / 2, y = cy * PIXEL + PIXEL / 2;
+    s.fx.shards(x, y, Math.min(36, 3 + broken / 3), 'Earth',
+      { speed: Math.min(240, 80 + Math.sqrt(energy) * 6), size: 1.2, life: 0.45 });
+    s.fx.smoke(x, y, Math.min(12, 2 + broken / 12), 'Earth',
+      { speed: 35, rise: 45, size: 1.4, life: 0.7 });
+    if (!rock.fragment) {
+      s.fx.shake('Earth', Math.min(0.012, 0.001 + Math.sqrt(spent) * 0.0004), 130);
+      if (broken >= 12) s.fx.hitstop(Math.min(55, 25 + broken / 8));
+    }
+    return broken;
   }
 
   // Pry earth loose near the cursor, nearest first. Never from directly under the
@@ -788,36 +882,53 @@ class EarthBending {
     rock.vy += (wy - rock.vy) * turn;
     // A held rock is dug out of the ground it sits in, and it is exactly the shape of
     // its own hole, so it has to be allowed to scrape — see rockCollides.
-    const impactSpeed = Math.hypot(rock.vx, rock.vy);
     this.moveRock(rock, dt, 'held');
-    this.strikeBodies(rock, impactSpeed);
   }
 
   // Orbit form: the rock never chases the cursor at all. It pins to the
   // bender and its cells rotate in place around that centre — a spinning
   // clump rather than a followed boulder — striking anything it swings past.
-  // (Cells clipping slightly into terrain while spinning is an accepted
-  // cosmetic quirk here, the same tolerance a held Bolt rock already has.)
+  // Contacts use their tangential speed, including movement of the caster.
   steerOrbitRock(dt) {
     const rock = this.rock;
     const p = this.scene.player;
     rock.x = p.x + p.w / 2;
     rock.y = p.y + p.h / 2;
+    const oldX = rock.orbitCenterX ?? rock.x, oldY = rock.orbitCenterY ?? rock.y;
+    const centerVx = dt > 0 ? (rock.x - oldX) / dt : 0;
+    const centerVy = dt > 0 ? (rock.y - oldY) / dt : 0;
+    rock.orbitCenterX = rock.x; rock.orbitCenterY = rock.y;
     rock.vx = 0;
     rock.vy = 0;
     const dtheta = ORBIT.SPIN * dt;
     const cos = Math.cos(dtheta), sin = Math.sin(dtheta);
+    const contacts = new Map();
+    let fastest = { vx: centerVx, vy: centerVy, speed: Math.hypot(centerVx, centerVy) };
     for (const c of rock.cells) {
+      const before = this.solidAt(oldX + c.ox * PIXEL, oldY + c.oy * PIXEL);
       const nx = c.ox * cos - c.oy * sin;
       const ny = c.ox * sin + c.oy * cos;
       c.ox = nx; c.oy = ny;
+      const px = rock.x + nx * PIXEL, py = rock.y + ny * PIXEL;
+      if (!before && this.solidAt(px, py)) {
+        const gx = Math.floor(px / PIXEL), gy = Math.floor(py / PIXEL);
+        contacts.set(this.scene.idx(gx, gy), { x: gx, y: gy });
+      }
+      const vx = centerVx - ny * PIXEL * ORBIT.SPIN;
+      const vy = centerVy + nx * PIXEL * ORBIT.SPIN;
+      const speed = Math.hypot(vx, vy);
+      if (speed > fastest.speed) fastest = { vx, vy, speed };
       c.hitCd = (c.hitCd || 0) - dt;
       if (c.hitCd <= 0) {
-        const px = rock.x + c.ox * PIXEL, py = rock.y + c.oy * PIXEL;
         if (orbitStrike(this.scene, px, py, 220)) c.hitCd = ORBIT.HIT_COOLDOWN;
       }
     }
-    this.strikeBodies(rock);
+    const impactRock = { ...rock, vx: fastest.vx, vy: fastest.vy, impactSource: rock };
+    if (contacts.size && this.scene.time.now >= (rock.orbitImpactUntil || 0)) {
+      this.crumbleTerrain(impactRock, [...contacts.values()]);
+      rock.orbitImpactUntil = this.scene.time.now + 220;
+    }
+    this.strikeBodies(impactRock, fastest.speed);
   }
 
   updateThrown(dt) {
@@ -832,9 +943,7 @@ class EarthBending {
       rock.age += dt;
       rock.vy += EARTH_BEND.GRAVITY * dt;
       rock.vx *= 1 - Math.min(1, 0.3 * dt);
-      const impactSpeed = Math.hypot(rock.vx, rock.vy);
       const hit = this.moveRock(rock, dt, 'thrown');
-      if (!rock.punched) this.strikeBodies(rock, impactSpeed);
       if (hit.down || rock.age > EARTH_BEND.FREE_LIFE) {
         this.stamp(rock);
         this.thrown.splice(i, 1);
@@ -849,8 +958,8 @@ class EarthBending {
     const hit = { side: false, down: false, up: false };
     const dist = Math.max(Math.abs(rock.vx), Math.abs(rock.vy)) * dt;
     const steps = Math.max(1, Math.ceil(dist / PIXEL));
-    const impactSpeed = Math.hypot(rock.vx, rock.vy);
     for (let k = 0; k < steps; k++) {
+      const impactSpeed = Math.hypot(rock.vx, rock.vy);
       const sx = (rock.vx * dt) / steps, sy = (rock.vy * dt) / steps;
       if (sx) {
         if (this.rockCollides(rock, sx, 0, mode)) { hit.side = true; rock.vx = 0; } else rock.x += sx;
@@ -861,58 +970,35 @@ class EarthBending {
           rock.vy = 0;
         } else rock.y += sy;
       }
-      if (mode === 'thrown' && rock.punched) this.strikeBodies(rock, impactSpeed);
+      this.strikeBodies(rock, impactSpeed);
       if (hit.down) break;
     }
     return hit;
   }
 
-  // Two rules, because a held rock and a thrown one have different problems.
-  //
-  //  held:   it may scrape but not bury itself. A move is refused only if it would
-  //          leave more of the rock inside terrain than before AND more than 15% of
-  //          it. That lets it rise out of the hole it is the exact shape of (the rim
-  //          catches a cell or two) while a wall still stops it.
-  //  thrown: any cell newly entering terrain stops it on that axis. Cells already
-  //          inside something (it was let go scraping a wall) are ignored, so a rock
-  //          released against a cliff still falls instead of sticking to it.
+  // Newly entering pixels receive an impact before deciding whether terrain
+  // stops the rock. Held rocks retain their extraction tolerance; thrown rocks
+  // ignore pixels they were already embedded in when released against a wall.
   rockCollides(rock, dx, dy, mode) {
-    if (mode === 'held') {
-      let before = 0, after = 0;
-      for (const c of rock.cells) {
-        const px = rock.x + c.ox * PIXEL, py = rock.y + c.oy * PIXEL;
-        if (this.solidAt(px, py)) before++;
-        if (this.solidAt(px + dx, py + dy)) {
-          const gx = Math.floor((px + dx) / PIXEL), gy = Math.floor((py + dy) / PIXEL);
-          if (!this.breakLightCell(gx, gy, rock)) after++;
-        }
-      }
-      return after > before && after > Math.max(1, rock.cells.length * 0.15);
-    }
+    const occupancy = [];
+    const contacts = new Map();
     for (const c of rock.cells) {
       const px = rock.x + c.ox * PIXEL, py = rock.y + c.oy * PIXEL;
-      if (this.solidAt(px + dx, py + dy) && !this.solidAt(px, py)) {
-        const gx = Math.floor((px + dx) / PIXEL), gy = Math.floor((py + dy) / PIXEL);
-        if (this.breakLightCell(gx, gy, rock)) continue;
-        return true;
+      const x = px + dx, y = py + dy;
+      const before = this.solidAt(px, py);
+      occupancy.push({ x, y, before });
+      if (!before && this.solidAt(x, y)) {
+        const gx = Math.floor(x / PIXEL), gy = Math.floor(y / PIXEL);
+        contacts.set(this.scene.idx(gx, gy), { x: gx, y: gy });
       }
     }
-    return false;
-  }
-
-  breakLightCell(gx, gy, rock) {
-    if (gx <= 0 || gx >= COLS - 1 || gy <= 0 || gy >= ROWS - 1) return false;
-    const s = this.scene;
-    const M = PixelWorld.MAT;
-    const id = s.idx(gx, gy);
-    const m = s.grid[id];
-    const speed = Math.hypot(rock.vx, rock.vy);
-    const fragile = m === M.GLASS || m === M.LEAVES || m === M.SNOW;
-    const timber = m === M.WOOD || m === M.TIMBER;
-    if (!((fragile && speed > 85) || (timber && speed > 180 && rock.cells.length >= 6))) return false;
-    s.setCell(id, EMPTY);
-    if (Math.random() < 0.18) s.fx.shards(gx * PIXEL, gy * PIXEL, 2, 'Earth');
-    return true;
+    this.crumbleTerrain(rock, [...contacts.values()]);
+    if (mode === 'held') {
+      const before = occupancy.filter((cell) => cell.before).length;
+      const after = occupancy.filter((cell) => this.solidAt(cell.x, cell.y)).length;
+      return after > before && after > Math.max(1, rock.cells.length * 0.15);
+    }
+    return occupancy.some((cell) => !cell.before && this.solidAt(cell.x, cell.y));
   }
 
   solidAt(px, py) {
