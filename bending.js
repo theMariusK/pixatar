@@ -1,17 +1,16 @@
 // Bending: hold the left mouse button over water or earth and it comes with you.
 //
-// B cycles the left mouse button through dig -> bend water -> bend earth -> bend
-// fire -> bend air -> dig. Water is below; earth (EarthBending) follows the same
+// Q selects the element, shape, and action; B toggles digging. Water is below;
+// earth (EarthBending) follows the same
 // principle but fuses what it lifts into one solid rock; fire (FireBending) is
 // conjured rather than lifted, since there is no fire lying around to take; air
 // (AirBending, last) holds and throws a swirling ball of wisps the same way, but
 // the wisps are pure force rather than matter — they push what they pass instead
 // of landing as a cell.
 //
-// Every element also has a Form (game.js, Q while bending opens the picker):
-// Bolt is everything described above; Orbit pins the same held matter to the
-// bender instead of the cursor and spins it in place for as long as the button
-// stays down, striking anything it swings past. See the "forms" section below.
+// Every element has a Form and an Action (game.js, Q opens the picker):
+// Bolt gathers near the cursor; Orbit holds a ring around the caster.
+// Normal releases what is held; Punch turns it into an element-specific attack.
 //
 // Water: while the button is held, water
 // near the cursor is lifted out of the grid a little at a time and gathers into a
@@ -42,6 +41,8 @@ const BEND = {
   GRAVITY: 900,       // px/s² on released drops
   SETTLE_RADIUS: 8,   // how far a landing drop looks for an open cell
   FREE_LIFE: 4,       // seconds a released drop may fly before it settles anyway
+  PUNCH_SPEED: 720,    // focused water jet
+  SPLASH_SPEED: 420,   // outward splash from Orbit Punch
 };
 
 // Golden-angle spiral: packs any number of drops into a round blob, with each new
@@ -72,10 +73,38 @@ function bendTarget(scene, reach) {
   return { x: px + (dx / d) * r, y: py + (dy / d) * r };
 }
 
+function bendAim(scene) {
+  const p = scene.player;
+  const cx = p.x + p.w / 2, cy = p.y + p.h / 2;
+  const pointer = scene.input.activePointer;
+  const dx = pointer.worldX - cx, dy = pointer.worldY - cy;
+  const length = Math.hypot(dx, dy);
+  return length > 1 ? { x: dx / length, y: dy / length }
+    : { x: p.facing || 1, y: 0 };
+}
+
+function bendOutward(x, y, cx, cy, index, count, phase = 0) {
+  const dx = x - cx, dy = y - cy;
+  const length = Math.hypot(dx, dy);
+  const angle = length > 1 ? Math.atan2(dy, dx) : phase + index * Math.PI * 2 / count;
+  return { x: Math.cos(angle), y: Math.sin(angle) };
+}
+
+function bendClearPath(scene, x0, y0, x1, y1) {
+  const steps = Math.ceil(Math.hypot(x1 - x0, y1 - y0) / PIXEL);
+  for (let i = 1; i < steps; i++) {
+    const gx = Math.floor((x0 + (x1 - x0) * i / steps) / PIXEL);
+    const gy = Math.floor((y0 + (y1 - y0) * i / steps) / PIXEL);
+    if (gx < 0 || gx >= COLS || gy < 0 || gy >= ROWS
+      || IS_SOLID[scene.grid[scene.idx(gx, gy)]]) return false;
+  }
+  return true;
+}
+
 // True while this element's bending owns the left mouse button.
 function bendSelected(scene, element) {
   return scene.leftClickMode === 'bend' && scene.bendElement === element
-    && !scene.player.dead && !scene.wheelOpen;
+    && !scene.player.dead && !scene.wheelOpen && !scene.bendWheelOpen;
 }
 
 // ---------------------------------------------------------------------------
@@ -87,9 +116,7 @@ function bendSelected(scene, element) {
 // the cursor at all: what's held pins to the bender and spins for as long as
 // the button stays down, and it hits whatever it swings past — the one thing
 // Bolt form never could. Letting go scatters the ring outward instead of
-// throwing one mass in one direction. Modifiers aren't wired up yet; Form is
-// the first slice of giving bending the same wheel-driven depth spells have
-// (see game.js, openBendWheel).
+// throwing one mass in one direction. Punch consumes it in a stronger attack.
 const ORBIT = {
   RADIUS: 34,          // px the ring sits at around the bender
   SPIN: 3.2,           // rad/s
@@ -192,6 +219,65 @@ class WaterBending {
     return this.held.length;
   }
 
+  punch() {
+    if (!this.held.length) return false;
+    const s = this.scene;
+    const p = s.player;
+    const cx = p.x + p.w / 2, cy = p.y + p.h / 2;
+    const count = this.held.length;
+    const aim = bendAim(s);
+    for (let i = 0; i < count; i++) {
+      const drop = this.held[i];
+      const dir = this.form === 'Orbit'
+        ? bendOutward(drop.x, drop.y, cx, cy, i, count, this.spin || 0) : aim;
+      const speed = this.form === 'Orbit' ? BEND.SPLASH_SPEED : BEND.PUNCH_SPEED;
+      drop.vx = dir.x * speed;
+      drop.vy = dir.y * speed;
+      drop.age = 0;
+      drop.punched = true;
+      this.free.push(drop);
+    }
+    this.held.length = 0;
+    if (this.form === 'Orbit') {
+      this.drenchBurst(cx, cy, ORBIT.RADIUS + 32, 180);
+      s.fx.shockwave(cx, cy, 'Water',
+        { r0: ORBIT.RADIUS * 0.5, r1: ORBIT.RADIUS + 64, life: 0.4, width: 3, rings: 2 });
+      s.fx.burst(cx, cy, Math.min(40, count / 3 + 10), 'Water',
+        { speed: 150, life: 0.5, size: 1.4 });
+    } else {
+      s.fx.streaks(cx, cy, Math.min(24, count / 5 + 6), 'Water',
+        { speed: 240, angle: Math.atan2(aim.y, aim.x), spread: 0.5, life: 0.35 });
+    }
+    return true;
+  }
+
+  drenchBurst(x, y, radius, impulse) {
+    const s = this.scene;
+    const now = s.time.now;
+    for (const target of bendContacts(s, [{ x, y }], radius)) {
+      if (!bendBodyWithin(target.body, x, y, radius)) continue;
+      const bx = target.body.x + target.body.w / 2;
+      const by = target.body.y + target.body.h / 2;
+      if (!bendClearPath(s, x, y, bx, by)) continue;
+      const key = target.id || target.enemy;
+      if (!bendHitReady(this.hitCooldowns, key, now, 170)) continue;
+      const dir = bendOutward(bx, by, x, y, 0, 1);
+      const ix = dir.x * impulse, iy = dir.y * impulse - 35;
+      if (target.enemy) {
+        target.enemy.wetUntil = now + 650;
+        target.enemy.impulseX = (target.enemy.impulseX || 0) + ix;
+        target.enemy.vy += iy;
+      } else s.reportHit(target.id, 'Water', 0, null, { wetMs: 650, ix, iy });
+    }
+    for (const obj of s.debris) {
+      if (Math.hypot(obj.x - x, obj.y - y) > radius
+        || !bendClearPath(s, x, y, obj.x, obj.y)) continue;
+      const dir = bendOutward(obj.x, obj.y, x, y, 0, 1);
+      obj.vx += dir.x * impulse;
+      obj.vy += dir.y * impulse - 35;
+    }
+  }
+
   target() {
     return bendTarget(this.scene, BEND.REACH);
   }
@@ -207,6 +293,7 @@ class WaterBending {
     }
     if (this.free.length) this.updateFree(dt);
     this.touchBodies();
+    this.pushObjects(dt);
   }
 
   touchBodies() {
@@ -219,6 +306,35 @@ class WaterBending {
       else s.reportHit(target.id, 'Water', 0, null, { wetMs: 450 });
       s.fx.burst(target.body.x + target.body.w / 2, target.body.y + target.body.h / 2,
         3, 'Water', { speed: 35, life: 0.25, size: 1 });
+    }
+  }
+
+  touchPunchDrop(drop) {
+    const s = this.scene;
+    const now = s.time.now;
+    for (const target of bendContacts(s, [drop], PIXEL * 1.5)) {
+      if (!bendBodyWithin(target.body, drop.x, drop.y, PIXEL * 1.5)) continue;
+      const key = target.id || target.enemy;
+      if (!bendHitReady(this.hitCooldowns, key, now, 170)) continue;
+      const ix = Math.max(-240, Math.min(240, drop.vx * 0.32));
+      const iy = Math.max(-220, Math.min(220, drop.vy * 0.32));
+      if (target.enemy) {
+        target.enemy.wetUntil = now + 650;
+        target.enemy.impulseX = (target.enemy.impulseX || 0) + ix;
+        target.enemy.vy += iy;
+      } else s.reportHit(target.id, 'Water', 0, null, { wetMs: 650, ix, iy });
+      s.fx.burst(drop.x, drop.y, 5, 'Water', { speed: 55, life: 0.28, size: 1.1 });
+    }
+  }
+
+  pushObjects(dt) {
+    const drops = this.free.filter((d) => d.punched);
+    if (!drops.length) return;
+    for (const obj of [...this.scene.debris, ...this.scene.projectiles]) {
+      const drop = drops.find((d) => Math.hypot(d.x - obj.x, d.y - obj.y) < PIXEL * 3);
+      if (!drop) continue;
+      obj.vx += drop.vx * dt * 1.5;
+      obj.vy += drop.vy * dt * 1.5;
     }
   }
 
@@ -332,6 +448,7 @@ class WaterBending {
     for (let k = 0; k < steps; k++) {
       if (this.solidAt(d.x + sx, d.y)) { d.vx *= -0.15; blocked = true; } else d.x += sx;
       if (this.solidAt(d.x, d.y + sy)) { d.vy *= -0.15; blocked = true; } else d.y += sy;
+      if (d.punched) this.touchPunchDrop(d);
       const gx = Math.floor(d.x / PIXEL), gy = Math.floor(d.y / PIXEL);
       const id = s.idx(gx, gy);
       const m = s.grid[id];
@@ -421,6 +538,8 @@ const EARTH_BEND = {
   GRAVITY: 1100,        // px/s² on a thrown rock
   FREE_LIFE: 6,         // seconds a thrown rock may fly before it lands anyway
   FOOTING: 3,           // rows under the bender's feet that are never lifted
+  PUNCH_SPEED: 690,     // focused rock strike
+  FRAGMENT_SPEED: 470,  // stone fragments from Orbit Punch
 };
 
 class EarthBending {
@@ -452,6 +571,52 @@ class EarthBending {
 
   get holding() {
     return (this.rock ? this.rock.cells.length : 0) + this.pieces.length;
+  }
+
+  punch() {
+    if (!this.rock || !this.holding) return false;
+    const s = this.scene;
+    const p = s.player;
+    const cx = p.x + p.w / 2, cy = p.y + p.h / 2;
+    const rock = this.rock;
+    // Pieces already lifted from terrain belong to this attack even if they
+    // had not reached their slots yet. Fusing them preserves their cell count.
+    for (const piece of this.pieces) {
+      const [ox, oy] = this.slots[piece.slot];
+      rock.cells.push({ ox, oy, shade: piece.variant || 0 });
+    }
+    this.pieces.length = 0;
+    if (this.form === 'Orbit') {
+      rock.x = cx; rock.y = cy;
+      const count = rock.cells.length;
+      for (let i = 0; i < count; i++) {
+        const cell = rock.cells[i];
+        const x = cx + cell.ox * PIXEL, y = cy + cell.oy * PIXEL;
+        const dir = bendOutward(x, y, cx, cy, i, count, this.spin || 0);
+        this.thrown.push({
+          x, y, vx: dir.x * EARTH_BEND.FRAGMENT_SPEED,
+          vy: dir.y * EARTH_BEND.FRAGMENT_SPEED,
+          age: 0, punched: true, fragment: true,
+          cells: [{ ox: 0, oy: 0, shade: cell.shade }],
+        });
+      }
+      s.fx.shockwave(cx, cy, 'Earth',
+        { r0: ORBIT.RADIUS * 0.4, r1: ORBIT.RADIUS * 3, life: 0.4, width: 3, rings: 2 });
+      s.fx.shards(cx, cy, Math.min(28, 6 + count / 5), 'Earth',
+        { speed: 180, life: 0.5, size: 1.4 });
+    } else {
+      const aim = bendAim(s);
+      rock.vx = aim.x * EARTH_BEND.PUNCH_SPEED;
+      rock.vy = aim.y * EARTH_BEND.PUNCH_SPEED;
+      rock.age = 0;
+      rock.punched = true;
+      this.thrown.push(rock);
+      s.fx.shards(rock.x, rock.y, Math.min(20, 5 + rock.cells.length / 8), 'Earth',
+        { speed: 130, angle: Math.atan2(aim.y, aim.x), spread: 1, life: 0.4 });
+    }
+    this.rock = this.active ? { ...bendTarget(s, EARTH_BEND.REACH),
+      vx: 0, vy: 0, cells: [], nextSlot: 0 } : null;
+    return true;
   }
 
   begin() {
@@ -669,7 +834,7 @@ class EarthBending {
       rock.vx *= 1 - Math.min(1, 0.3 * dt);
       const impactSpeed = Math.hypot(rock.vx, rock.vy);
       const hit = this.moveRock(rock, dt, 'thrown');
-      this.strikeBodies(rock, impactSpeed);
+      if (!rock.punched) this.strikeBodies(rock, impactSpeed);
       if (hit.down || rock.age > EARTH_BEND.FREE_LIFE) {
         this.stamp(rock);
         this.thrown.splice(i, 1);
@@ -684,6 +849,7 @@ class EarthBending {
     const hit = { side: false, down: false, up: false };
     const dist = Math.max(Math.abs(rock.vx), Math.abs(rock.vy)) * dt;
     const steps = Math.max(1, Math.ceil(dist / PIXEL));
+    const impactSpeed = Math.hypot(rock.vx, rock.vy);
     for (let k = 0; k < steps; k++) {
       const sx = (rock.vx * dt) / steps, sy = (rock.vy * dt) / steps;
       if (sx) {
@@ -695,6 +861,7 @@ class EarthBending {
           rock.vy = 0;
         } else rock.y += sy;
       }
+      if (mode === 'thrown' && rock.punched) this.strikeBodies(rock, impactSpeed);
       if (hit.down) break;
     }
     return hit;
@@ -767,6 +934,11 @@ class EarthBending {
       this.placeStone(gx, gy, c.shade, M);
     }
     const n = rock.cells.length;
+    if (rock.fragment) {
+      if (Math.random() < 0.3) s.fx.burst(rock.x, rock.y, 2, 'Earth',
+        { speed: 40, life: 0.25, size: 0.8 });
+      return;
+    }
     s.fx.burst(rock.x, rock.y + 4, Math.min(24, 4 + n / 6), 'Earth', { speed: 70, life: 0.6, rise: 30 });
     s.fx.shake('Earth', Math.min(0.01, 0.002 + n * 0.00005), 140);
   }
@@ -1463,6 +1635,9 @@ const AIR_BEND = {
   PUSH_PAD: 26,          // px added to the ball's own radius when it pushes
   GAS_CHANCE: 0.5,       // per-cell chance a caught puff of smoke/gas/fire drifts this tick
   GAS_BUDGET: 40,        // cells checked per push, so a big ball stays cheap
+  PUNCH_SPEED: 790,      // forward speed of a focused pressure blast
+  RING_SPEED: 430,       // outward speed of an Orbit Punch wave
+  RING_RANGE: 165,       // maximum wind-ring radius in pixels
 };
 
 class AirBending {
@@ -1477,6 +1652,9 @@ class AirBending {
     this.grabAcc = 0;
     this.grabOffsets = bendDiscOffsets(AIR_BEND.GRAB_RADIUS);
     this.gfx = scene.add.graphics().setDepth(8.5);
+    this.jetDirections = new Map();
+    this.nextJetId = 0;
+    this.rings = [];
   }
 
   begin() {
@@ -1509,6 +1687,39 @@ class AirBending {
     return this.held.length;
   }
 
+  punch() {
+    if (!this.held.length) return false;
+    const s = this.scene;
+    const p = s.player;
+    const cx = p.x + p.w / 2, cy = p.y + p.h / 2;
+    const count = this.held.length;
+    if (this.form === 'Orbit') {
+      this.held.length = 0;
+      this.rings.push({ x: cx, y: cy, radius: 24,
+        strength: Math.min(440, 230 + count * 2) });
+      this.gust(cx, cy, 30, 115);
+      s.fx.shockwave(cx, cy, 'Air',
+        { r0: 18, r1: AIR_BEND.RING_RANGE, life: 0.34, width: 4, rings: 2 });
+      s.fx.burst(cx, cy, Math.min(36, 8 + count / 3), 'Air',
+        { speed: 160, life: 0.4, size: 1.3 });
+    } else {
+      const aim = bendAim(s);
+      const id = ++this.nextJetId;
+      this.jetDirections.set(id, aim);
+      for (const wisp of this.held) {
+        wisp.vx = aim.x * AIR_BEND.PUNCH_SPEED;
+        wisp.vy = aim.y * AIR_BEND.PUNCH_SPEED;
+        wisp.age = 0;
+        wisp.jetId = id;
+        this.free.push(wisp);
+      }
+      this.held.length = 0;
+      s.fx.streaks(cx, cy, Math.min(24, 7 + count / 5), 'Air',
+        { speed: 270, angle: Math.atan2(aim.y, aim.x), spread: 0.55, life: 0.32 });
+    }
+    return true;
+  }
+
   target() {
     return bendTarget(this.scene, AIR_BEND.REACH);
   }
@@ -1527,7 +1738,41 @@ class AirBending {
       if (this.form === 'Orbit') this.steerOrbit(dt); else this.steerHeld(dt);
       this.groupPush(this.held, AIR_BEND.HOLD_ACCEL * dt);
     }
-    if (this.free.length) { this.updateFree(dt); this.groupPush(this.free, AIR_BEND.THROW_ACCEL * dt); }
+    if (this.free.length) {
+      this.updateFree(dt);
+      const ordinary = [];
+      const jets = new Map();
+      for (const wisp of this.free) {
+        if (!wisp.jetId) ordinary.push(wisp);
+        else {
+          if (!jets.has(wisp.jetId)) jets.set(wisp.jetId, []);
+          jets.get(wisp.jetId).push(wisp);
+        }
+      }
+      this.groupPush(ordinary, AIR_BEND.THROW_ACCEL * dt);
+      for (const [id, wisps] of jets) {
+        this.groupPush(wisps, AIR_BEND.THROW_ACCEL * dt * 1.7,
+          this.jetDirections.get(id));
+      }
+      for (const id of this.jetDirections.keys()) {
+        if (!jets.has(id)) this.jetDirections.delete(id);
+      }
+    }
+    this.updateRings(dt);
+  }
+
+  updateRings(dt) {
+    for (let i = this.rings.length - 1; i >= 0; i--) {
+      const ring = this.rings[i];
+      const steps = Math.max(1, Math.ceil(AIR_BEND.RING_SPEED * dt / 16));
+      for (let step = 0; step < steps; step++) {
+        ring.radius += AIR_BEND.RING_SPEED * dt / steps;
+        this.gust(ring.x, ring.y, ring.radius,
+          ring.strength * Math.min(1, AIR_BEND.RING_SPEED * dt / steps / 16),
+          null, Math.max(0, ring.radius - 32));
+      }
+      if (ring.radius >= AIR_BEND.RING_RANGE) this.rings.splice(i, 1);
+    }
   }
 
   // Draw new wisps out of the air near the cursor, nearest first, up to the
@@ -1652,36 +1897,44 @@ class AirBending {
 
   // Pushes everything near a whole cluster of wisps at once, from the
   // cluster's own centre and size, so the force doesn't stack once per wisp.
-  groupPush(list, strength) {
+  groupPush(list, strength, direction = null) {
     if (!list.length) return;
     let sx = 0, sy = 0;
     for (const d of list) { sx += d.x; sy += d.y; }
     const cx = sx / list.length, cy = sy / list.length;
     const radiusPx = AIR_BEND.SPACING * PIXEL * Math.sqrt(list.length) + AIR_BEND.PUSH_PAD;
-    this.gust(cx, cy, radiusPx, strength);
+    this.gust(cx, cy, radiusPx, strength, direction);
   }
 
   // Pushes bodies and loose objects away from the gust, including the caster.
-  gust(cx, cy, radiusPx, strength) {
+  gust(cx, cy, radiusPx, strength, direction = null, innerRadius = 0) {
     const s = this.scene;
+    const falloff = (distance) => {
+      if (distance >= radiusPx || distance < innerRadius) return 0;
+      if (!innerRadius) return 1 - distance / radiusPx;
+      const half = (radiusPx - innerRadius) / 2;
+      return Math.max(0, 1 - Math.abs(distance - innerRadius - half) / half);
+    };
     const push = (ox, oy, obj) => {
       const dx = ox - cx, dy = oy - cy;
       const d = Math.max(1, Math.hypot(dx, dy));
-      if (d >= radiusPx) return;
-      const mag = strength * (1 - d / radiusPx);
-      obj.vx += (dx / d) * mag;
-      obj.vy += (dx === 0 && dy === 0 ? -1 : dy / d) * mag;
+      const mag = strength * falloff(d);
+      if (!mag) return;
+      obj.vx += (direction ? direction.x : dx / d) * mag;
+      obj.vy += (direction ? direction.y : dx === 0 && dy === 0 ? -1 : dy / d) * mag;
     };
     const bodyForce = (body) => {
       const nearX = Math.max(body.x, Math.min(cx, body.x + body.w));
       const nearY = Math.max(body.y, Math.min(cy, body.y + body.h));
       const distance = Math.hypot(nearX - cx, nearY - cy);
-      if (distance >= radiusPx) return null;
+      const fall = falloff(distance);
+      if (!fall) return null;
       const dx = body.x + body.w / 2 - cx;
       const dy = body.y + body.h / 2 - cy;
       const d = Math.hypot(dx, dy);
-      const mag = strength * (1 - distance / radiusPx);
-      return { ix: d > 0.01 ? dx / d * mag : 0, iy: d > 0.01 ? dy / d * mag : -mag };
+      const mag = strength * fall;
+      return { ix: direction ? direction.x * mag : d > 0.01 ? dx / d * mag : 0,
+        iy: direction ? direction.y * mag : d > 0.01 ? dy / d * mag : -mag };
     };
     for (const e of s.enemies.list) {
       if (e.dead) continue;
@@ -1703,14 +1956,14 @@ class AirBending {
       if (!target.id || !force || !bendHitReady(this.hitCooldowns, target.id, now, 80)) continue;
       s.reportHit(target.id, 'Air', 0, null, force);
     }
-    this.blowGas(cx, cy, radiusPx);
+    this.blowGas(cx, cy, radiusPx, direction);
   }
 
   // The one way a gust touches the grid: any smoke, gas or fire cell in range
   // may drift one cell further from (cx, cy), same idea as everything else the
   // gust pushes. Bounded per call so a wide gust can't become an unbounded
   // scan every frame.
-  blowGas(cx, cy, radiusPx) {
+  blowGas(cx, cy, radiusPx, direction = null) {
     const s = this.scene;
     const gx0 = Math.max(1, Math.floor((cx - radiusPx) / PIXEL));
     const gx1 = Math.min(COLS - 2, Math.floor((cx + radiusPx) / PIXEL));
@@ -1728,7 +1981,8 @@ class AirBending {
         if (d >= radiusPx) continue;
         budget--;
         if (Math.random() > AIR_BEND.GAS_CHANCE) continue;
-        const ux = d > 0.01 ? dx / d : 0, uy = d > 0.01 ? dy / d : -1;
+        const ux = direction ? direction.x : d > 0.01 ? dx / d : 0;
+        const uy = direction ? direction.y : d > 0.01 ? dy / d : -1;
         const nx = x + Math.round(ux), ny = y + Math.round(uy);
         if (nx === x && ny === y) continue;
         if (nx <= 0 || nx >= COLS - 1 || ny <= 0 || ny >= ROWS - 1) continue;

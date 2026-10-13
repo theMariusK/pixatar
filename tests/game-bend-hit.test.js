@@ -11,7 +11,14 @@ const Phaser = {
   AUTO: 0,
   Scale: { FIT: 0, CENTER_BOTH: 0 },
   Math: { Clamp: (n, lo, hi) => Math.max(lo, Math.min(hi, n)) },
-  Input: { Keyboard: { JustUp: () => false } },
+  Input: { Keyboard: {
+    JustUp: () => false,
+    JustDown(key) {
+      const pressed = !!key?.justDown;
+      if (key) key.justDown = false;
+      return pressed;
+    },
+  } },
   Game: class {},
 };
 const casts = [];
@@ -103,31 +110,71 @@ test('fire spells emit particles from the caster on cast and while channeling', 
   assert.ok(bursts.length > before);
 });
 
-test('Fire Q wheel selects form and outer Punch action independently', () => {
+test('Q equips an element, shape, and action from digging mode', () => {
   const s = scene();
-  s.bendElement = 'Fire';
-  s.bendStyle = { Fire: 'Bolt' };
-  s.bendAction = { Fire: 'Normal' };
-  s.benders = { Fire: { form: 'Bolt' } };
+  let releases = 0;
+  s.leftClickMode = 'dig';
+  s.bendElement = 'Water';
+  s.bendStyle = { Water: 'Bolt', Fire: 'Bolt' };
+  s.bendAction = { Water: 'Normal', Fire: 'Normal' };
+  s.benders = { Water: { release() { releases++; } }, Fire: { form: 'Bolt' } };
   s.wheelGfx = { clear() {} };
   s.wheelPreviewText = { setVisible() {} };
-  s.keys.q = {};
+  s.keys.q = { justDown: true };
+  s.keys.e = {};
   s.drawBendWheel = () => {};
-  s.input = { activePointer: { x: 360, y: 240 } };
-  s.openBendWheel();
-  s.updateBendWheel(); // inner left half: Orbit
-  s.input.activePointer.x = 540;
+  s.input = { activePointer: { x: 454, y: 274 } };
+  s.updateSpellWheel();
+  assert.equal(s.bendWheelOpen, true);
+  assert.equal(s.wheelOpen, undefined);
+  s.updateBendWheel(); // inner lower right quarter: Fire
+  s.input.activePointer = { x: 330, y: 240 };
+  s.updateBendWheel(); // middle left half: Orbit
+  s.input.activePointer.x = 550;
   s.updateBendWheel(); // outer right half: Punch
   s.closeBendWheel();
+  assert.equal(s.bendElement, 'Fire');
+  assert.equal(s.leftClickMode, 'bend');
+  assert.equal(releases, 1);
   assert.equal(s.bendStyle.Fire, 'Orbit');
   assert.equal(s.bendAction.Fire, 'Punch');
   assert.equal(s.benders.Fire.form, 'Orbit');
 
-  s.input.activePointer.x = 300;
+  s.input.activePointer.x = 290;
   s.openBendWheel();
   s.updateBendWheel(); // outer left half: Normal
   s.closeBendWheel();
   assert.equal(s.bendAction.Fire, 'Normal');
+});
+
+test('Q wheel remembers Punch separately for every element', () => {
+  const s = scene();
+  s.bendStyle = { Water: 'Bolt', Earth: 'Bolt', Fire: 'Bolt', Air: 'Bolt' };
+  s.bendAction = { Water: 'Normal', Earth: 'Normal', Fire: 'Normal', Air: 'Normal' };
+  s.benders = Object.fromEntries(Object.keys(s.bendStyle).map((key) => [key,
+    { form: 'Bolt', release() {} }]));
+  s.wheelGfx = { clear() {} };
+  s.wheelPreviewText = { setVisible() {} };
+  s.keys.q = {};
+  s.drawBendWheel = () => {};
+  s.bendElement = 'Fire';
+  const positions = { Water: [386, 274], Earth: [386, 206], Air: [454, 206] };
+  s.input = { activePointer: {} };
+  for (const element of ['Water', 'Earth', 'Air']) {
+    s.openBendWheel();
+    const [x, y] = positions[element];
+    s.input.activePointer = { x, y };
+    s.updateBendWheel();
+    s.input.activePointer = { x: 550, y: 240 };
+    s.updateBendWheel();
+    s.closeBendWheel();
+    assert.equal(s.bendAction[element], 'Punch');
+  }
+  assert.equal(s.bendAction.Fire, 'Normal');
+  s.openBendWheel();
+  s.input.activePointer = { x: 386, y: 274 };
+  s.updateBendWheel();
+  assert.equal(s.bendActionSel, 0);
 });
 
 test('right-click uses Fire Punch while fire bending', () => {
@@ -147,7 +194,6 @@ test('right-click uses Fire Punch while fire bending', () => {
     lineStyle() { return this; },
     strokeCircle() { return this; },
   };
-  s.materialIndex = 0;
   s.input = { activePointer: {
     worldX: 100, worldY: 100,
     leftButtonDown: () => true, rightButtonDown: () => true,
@@ -155,4 +201,99 @@ test('right-click uses Fire Punch while fire bending', () => {
   s.handlePointer();
   assert.equal(punches, 1);
   assert.equal(spellCasts, 0);
+});
+
+test('right-click dispatches Punch for Water, Earth, and Air', () => {
+  for (const element of ['Water', 'Earth', 'Air']) {
+    const s = scene();
+    let punches = 0, spellCasts = 0;
+    s.leftClickMode = 'bend';
+    s.bendElement = element;
+    s.bendAction = { [element]: 'Punch' };
+    s.benders = { [element]: { grabRadius: 6,
+      punch() { punches++; }, begin() {}, release() {} } };
+    s.rightClickMode = 'secondary';
+    s.castWheelSpell = () => { spellCasts++; };
+    s.stopChannel = () => {};
+    s.prevLeftDown = true;
+    s.prevRightDown = false;
+    s.brushGfx = { clear() { return this; }, lineStyle() { return this; },
+      strokeCircle() { return this; } };
+    s.input = { activePointer: { worldX: 100, worldY: 100,
+      leftButtonDown: () => true, rightButtonDown: () => true } };
+    s.handlePointer();
+    assert.equal(punches, 1, element);
+    assert.equal(spellCasts, 0, element);
+  }
+});
+
+test('Q wheel renders only the four elements and implemented shape/action choices', () => {
+  const s = scene();
+  const icons = [];
+  let preview;
+  s.bendElementSel = 0;
+  s.bendFormSel = 1;
+  s.bendActionSel = 0;
+  const gfx = {};
+  for (const method of ['clear', 'fillStyle', 'beginPath', 'arc', 'closePath',
+    'fillPath', 'lineStyle', 'strokePath', 'fillCircle']) gfx[method] = () => gfx;
+  s.wheelGfx = gfx;
+  s.drawWheelIcon = (_gfx, name) => icons.push(name);
+  s.wheelPreviewText = { setVisible() {}, setText(text) { preview = text; } };
+  s.drawBendWheel();
+  assert.deepEqual(icons, ['Fire', 'Water', 'Earth', 'Air', 'Bolt', 'Orbit', 'Punch', 'Normal']);
+  assert.match(preview, /Fire \+ Orbit \+ Punch/);
+  assert.match(preview, /Radial fire burst/);
+});
+
+test('right-click does not create material in dig or Normal bending mode', () => {
+  for (const mode of ['dig', 'bend']) {
+    const s = scene();
+    s.leftClickMode = mode;
+    s.rightClickMode = 'none';
+    s.bendElement = 'Water';
+    s.bendAction = { Water: 'Normal' };
+    s.benders = { Water: { grabRadius: 6, release() {} } };
+    s.prevLeftDown = false;
+    s.prevRightDown = false;
+    s.placeCircle = () => assert.fail('manual placement must be disabled');
+    s.sendNet = () => assert.fail('right-click must not send a placement');
+    s.brushGfx = { clear() { return this; }, lineStyle() { return this; },
+      strokeCircle() { return this; } };
+    s.input = { activePointer: { worldX: 100, worldY: 100,
+      leftButtonDown: () => false, rightButtonDown: () => true } };
+    s.handlePointer();
+  }
+});
+
+test('Q wheel pauses mouse actions while choosing an element', () => {
+  const s = scene();
+  const stopped = [];
+  s.bendWheelOpen = true;
+  s.brushGfx = { clear() {} };
+  s.stopChannel = (slot) => stopped.push(slot);
+  s.input = { activePointer: {
+    leftButtonDown: () => true, rightButtonDown: () => true,
+  } };
+  s.handlePointer();
+  assert.deepEqual(stopped, ['primary', 'secondary']);
+  assert.equal(s.prevLeftDown, true);
+  assert.equal(s.prevRightDown, true);
+});
+
+test('B toggles digging without cycling the selected element', () => {
+  const s = scene();
+  s.leftClickMode = 'bend';
+  s.bendElement = 'Fire';
+  s.stopChannel = () => {};
+  s.keys.b = { justDown: true };
+  s.keys.esc = {};
+  s.keys.r = {};
+  s.handleSpellKeys();
+  assert.equal(s.leftClickMode, 'dig');
+  assert.equal(s.bendElement, 'Fire');
+  s.keys.b.justDown = true;
+  s.handleSpellKeys();
+  assert.equal(s.leftClickMode, 'bend');
+  assert.equal(s.bendElement, 'Fire');
 });

@@ -69,6 +69,70 @@ test('water contact gives other players and enemies a swimming state', () => {
   assert.equal(s.hits.length, 1);
 });
 
+test('opening the Q wheel releases held bending while free matter keeps moving', () => {
+  const s = scene();
+  s.leftClickMode = 'bend';
+  s.bendElement = 'Water';
+  s.bendWheelOpen = true;
+  const bend = new WaterBending(s);
+  bend.begin();
+  bend.held.push({ x: 70, y: 36, vx: 100, vy: 0 });
+  bend.update(0.016);
+  assert.equal(bend.active, false);
+  assert.equal(bend.held.length, 0);
+  assert.equal(bend.free.length, 1);
+  assert.ok(bend.free[0].x > 70);
+});
+
+test('Water Bolt Punch uses held drops as a pushing, dousing jet', () => {
+  const s = scene();
+  s.input.activePointer = { worldX: 200, worldY: 36 };
+  s.remotePlayers.other = { x: 100, y: 20 };
+  s.grid[s.idx(28, 12)] = MAT.FIRE;
+  const bend = new WaterBending(s);
+  bend.held.push({ x: 70, y: 36, vx: 0, vy: 0 });
+  bend.held.push({ x: 70, y: 39, vx: 0, vy: 0 });
+  assert.equal(bend.punch(), true);
+  assert.equal(bend.held.length, 0);
+  assert.equal(bend.free.length, 2);
+  bend.updateFree(0.04);
+  bend.touchBodies();
+  assert.equal(s.grid[s.idx(28, 12)], MAT.SMOKE);
+  assert.equal(s.hits[0][4].wetMs, 650);
+  assert.ok(s.hits[0][4].ix > 0);
+  assert.equal(s.selfHits.length, 0);
+});
+
+test('Water Orbit Punch expands held drops and drenches nearby bodies', () => {
+  const s = scene();
+  s.remotePlayers.other = { x: 65, y: 20 };
+  s.debris.push({ x: 52, y: 36, vx: 0, vy: 0 });
+  const bend = new WaterBending(s);
+  bend.form = 'Orbit';
+  for (let i = 0; i < 8; i++) {
+    const a = i * Math.PI / 4;
+    bend.held.push({ x: 30 + Math.cos(a) * 20, y: 36 + Math.sin(a) * 20,
+      vx: 0, vy: 0 });
+  }
+  assert.equal(bend.punch(), true);
+  assert.equal(bend.free.length, 8);
+  assert.ok(bend.free.every((d) => (d.x - 30) * d.vx + (d.y - 36) * d.vy > 0));
+  assert.equal(s.hits[0][4].wetMs, 650);
+  assert.ok(s.debris[0].vx > 0);
+  assert.equal(s.selfHits.length, 0);
+});
+
+test('Water Orbit Punch does not drench through a solid wall', () => {
+  const s = scene();
+  s.remotePlayers.other = { x: 65, y: 20 };
+  s.grid[s.idx(15, 12)] = MAT.STONE;
+  const bend = new WaterBending(s);
+  bend.form = 'Orbit';
+  bend.held.push({ x: 30, y: 36, vx: 0, vy: 0 });
+  bend.punch();
+  assert.equal(s.hits.length, 0);
+});
+
 test('fire ignites fuel and burns touched bodies', () => {
   const s = scene();
   const bend = new FireBending(s);
@@ -108,6 +172,43 @@ test('earth breaks light terrain and strikes bodies', () => {
   assert.equal(s.damage[0][2], 'Earth');
 });
 
+test('Earth Bolt Punch drives the gathered rock through light terrain into a player', () => {
+  const s = scene();
+  s.input.activePointer = { worldX: 200, worldY: 36 };
+  s.remotePlayers.other = { x: 100, y: 20 };
+  s.grid[s.idx(30, 12)] = MAT.GLASS;
+  const bend = new EarthBending(s);
+  bend.rock = { x: 70, y: 36, vx: 0, vy: 0, nextSlot: 1,
+    cells: [{ ox: 0, oy: 0, shade: 0 }] };
+  assert.equal(bend.punch(), true);
+  assert.equal(bend.thrown.length, 1);
+  assert.equal(bend.rock, null);
+  bend.updateThrown(0.05);
+  assert.equal(s.grid[s.idx(30, 12)], MAT.EMPTY);
+  assert.equal(s.hits[0][1], 'Earth');
+  assert.ok(s.hits[0][2] > 0);
+  assert.equal(s.selfHits.length, 0);
+});
+
+test('Earth Orbit Punch sends conserved stone fragments outward', () => {
+  const s = scene();
+  s.remotePlayers.other = { x: 65, y: 20 };
+  const bend = new EarthBending(s);
+  bend.form = 'Orbit';
+  bend.rock = { x: 30, y: 36, vx: 0, vy: 0, nextSlot: 4, cells: [
+    { ox: 5, oy: 0, shade: 0 }, { ox: -5, oy: 0, shade: 0 },
+    { ox: 0, oy: 5, shade: 0 }, { ox: 0, oy: -5, shade: 0 },
+  ] };
+  assert.equal(bend.punch(), true);
+  assert.equal(bend.thrown.length, 4);
+  assert.ok(bend.thrown.every((r) => r.fragment && r.cells.length === 1));
+  assert.ok(bend.thrown.some((r) => r.vx > 0));
+  assert.ok(bend.thrown.some((r) => r.vx < 0));
+  bend.updateThrown(0.08);
+  assert.equal(s.hits[0][1], 'Earth');
+  assert.equal(s.selfHits.length, 0);
+});
+
 test('air preserves enemy push and relays player push', () => {
   const s = scene();
   const bend = new AirBending(s);
@@ -115,6 +216,35 @@ test('air preserves enemy push and relays player push', () => {
   assert.ok(s.enemies.list[0].impulseX > 0);
   assert.equal(s.hits[0][1], 'Air');
   assert.ok(s.hits[0][4].ix < 0);
+});
+
+test('Air Bolt Punch pushes players and loose objects forward', () => {
+  const s = scene();
+  s.input.activePointer = { worldX: 200, worldY: 36 };
+  s.remotePlayers.other = { x: 95, y: 20 };
+  s.debris.push({ x: 92, y: 36, vx: 0, vy: 0 });
+  s.projectiles.push({ x: 92, y: 36, vx: 0, vy: 0 });
+  const bend = new AirBending(s);
+  for (let i = 0; i < 18; i++) bend.held.push({ x: 70, y: 36, vx: 0, vy: 0, life: 5 });
+  assert.equal(bend.punch(), true);
+  bend.update(0.03);
+  assert.ok(s.hits[0][4].ix > 0);
+  assert.ok(s.debris[0].vx > 0);
+  assert.ok(s.projectiles[0].vx > 0);
+});
+
+test('Air Orbit Punch expands as a ring and pushes the caster and distant targets', () => {
+  const s = scene();
+  s.remotePlayers.other = { x: 105, y: 20 };
+  const bend = new AirBending(s);
+  bend.form = 'Orbit';
+  bend.held.push({ x: 30, y: 36, vx: 0, vy: 0, life: 5 });
+  assert.equal(bend.punch(), true);
+  assert.equal(bend.held.length, 0);
+  assert.ok(s.selfHits.length > 0);
+  bend.updateRings(0.12);
+  assert.equal(s.hits[0][1], 'Air');
+  assert.ok(s.hits[0][4].ix > 0);
 });
 
 test('water, earth, and fire bending spare the caster while air pushes them', () => {
