@@ -154,10 +154,13 @@ function bendSteam(scene, x, y, amount = 1) {
     { speed: 25, rise: 85, life: 0.75, size: 1.8 });
 }
 
-function bendCoolBall(scene, ball, x, y) {
-  const before = Math.max(1, ball.mass);
-  ball.mass = Math.max(0, before - 6); // each water cell absorbs six embers' heat
-  const ratio = Math.sqrt(ball.mass / before);
+function bendCoolBall(scene, ball, x, y, drop = null) {
+  const before = Math.max(0, ball.mass);
+  const shield = drop?.bendAbility?.kind === 'Shield' ? drop.bendAbility : null;
+  const cooling = shield && shield.age <= 0.22 ? 10 : 6;
+  ball.mass = Math.max(0, before - cooling / (ball.attackPower || 1));
+  if (shield) { ball.vx *= 0.85; ball.vy *= 0.85; }
+  const ratio = before > 0 ? Math.sqrt(ball.mass / before) : 0;
   ball.size *= ratio;
   for (const ember of ball.embers || []) ember.radius *= ratio;
   if (ball.mass === 0) ball.doused = true;
@@ -170,7 +173,7 @@ function bendReactWater(scene, drop) {
   for (const ball of fire.fireballs) {
     if (ball.doused || !bendNear(drop.x, drop.y, ball.x, ball.y, ball.size + PIXEL)) continue;
     if (!bendClearPath(scene, drop.x, drop.y, ball.x, ball.y, true)) continue;
-    bendCoolBall(scene, ball, drop.x, drop.y);
+    bendCoolBall(scene, ball, drop.x, drop.y, drop);
     return true;
   }
   for (const list of [fire.held, fire.free]) {
@@ -206,7 +209,7 @@ function bendCoolBallInWater(scene, ball) {
       if (!bendNear(ball.x, ball.y, drop.x, drop.y, ball.size + PIXEL)
         || !bendClearPath(scene, ball.x, ball.y, drop.x, drop.y, true)) continue;
       list.splice(i, 1);
-      bendCoolBall(scene, ball, drop.x, drop.y);
+      bendCoolBall(scene, ball, drop.x, drop.y, drop);
     }
   }
   return ball.doused;
@@ -260,6 +263,22 @@ function bendInterceptRock(scene, rock) {
 function bendSelected(scene, element) {
   return scene.leftClickMode === 'bend' && scene.bendElement === element
     && !scene.player.dead && !scene.wheelOpen && !scene.bendWheelOpen;
+}
+
+function bendCapacity(scene, element, maximum) {
+  return scene.attackControl?.gatherCapacity(element) ?? maximum;
+}
+
+function bendShot(scene, element) {
+  return scene.attackControl?.shot(element) ?? { charge: 0, speed: 1, power: 1 };
+}
+
+function bendReleasePower(scene, element) {
+  return scene.attackControl?.releasePower(element) ?? { charge: 0, speed: 1, power: 1 };
+}
+
+function bendHoldingPaused(scene, element) {
+  return (scene.wheelOpen || scene.bendWheelOpen) && scene.attackControl?.keeps(element);
 }
 
 // ---------------------------------------------------------------------------
@@ -573,19 +592,22 @@ class WaterBending {
   // Let go of everything held. Bolt's drops keep their velocity, which is the
   // throw; Orbit's have almost none, so they get an outward kick instead —
   // letting go of a ring reads as releasing it, not an arbitrary scatter.
-  release() {
+  release(force = false) {
     if (!this.active && !this.held.length) return;
     this.active = false;
+    if (!force && this.scene.attackControl?.keeps(this.element)) return;
+    const shot = bendReleasePower(this.scene, this.element), aim = bendAim(this.scene);
     const p = this.scene.player;
     const cx = p.x + p.w / 2, cy = p.y + p.h / 2;
     for (const d of this.held) {
       d.age = 0;
+      d.attackPower = shot.power;
       if (this.form === 'Orbit') {
         const dx = d.x - cx, dy = d.y - cy;
         const dist = Math.max(1, Math.hypot(dx, dy));
-        d.vx += (dx / dist) * ORBIT.RELEASE_KICK;
-        d.vy += (dy / dist) * ORBIT.RELEASE_KICK;
-      }
+        d.vx += (dx / dist) * ORBIT.RELEASE_KICK * shot.speed;
+        d.vy += (dy / dist) * ORBIT.RELEASE_KICK * shot.speed;
+      } else if (shot.charge) { d.vx = aim.x * BEND.MAX_SPEED * shot.speed; d.vy = aim.y * BEND.MAX_SPEED * shot.speed; }
       this.free.push(d);
     }
     this.held.length = 0;
@@ -601,22 +623,24 @@ class WaterBending {
     const p = s.player;
     const cx = p.x + p.w / 2, cy = p.y + p.h / 2;
     const count = this.held.length;
+    const shot = bendShot(s, this.element);
     const aim = bendAim(s);
     for (let i = 0; i < count; i++) {
       const drop = this.held[i];
       const dir = this.form === 'Orbit'
         ? bendOutward(drop.x, drop.y, cx, cy, i, count, this.spin || 0) : aim;
-      const speed = this.form === 'Orbit' ? BEND.SPLASH_SPEED : BEND.PUNCH_SPEED;
+      const speed = (this.form === 'Orbit' ? BEND.SPLASH_SPEED : BEND.PUNCH_SPEED) * shot.speed;
       drop.vx = dir.x * speed;
       drop.vy = dir.y * speed;
       drop.age = 0;
       drop.punched = true;
       drop.punchMass = count;
+      drop.attackPower = shot.power;
       this.free.push(drop);
     }
     this.held.length = 0;
     if (this.form === 'Orbit') {
-      this.drenchBurst(cx, cy, ORBIT.RADIUS + 32, 180);
+      this.drenchBurst(cx, cy, ORBIT.RADIUS + 32, 180 * shot.power);
       s.fx.shockwave(cx, cy, 'Water',
         { r0: ORBIT.RADIUS * 0.5, r1: ORBIT.RADIUS + 64, life: 0.4, width: 3, rings: 2 });
       s.fx.burst(cx, cy, Math.min(40, count / 3 + 10), 'Water',
@@ -657,7 +681,7 @@ class WaterBending {
   }
 
   target() {
-    return bendTarget(this.scene, BEND.REACH);
+    return this.scene.attackControl?.holdingTarget(this.element) || bendTarget(this.scene, BEND.REACH);
   }
 
   update(dt) {
@@ -667,7 +691,9 @@ class WaterBending {
 
     if (this.active) this.grab(dt);
     if (this.held.length) {
-      if (this.form === 'Orbit') this.steerOrbit(dt); else this.steerHeld(dt);
+      if (!bendHoldingPaused(this.scene, this.element)) {
+        if (this.form === 'Orbit') this.steerOrbit(dt); else this.steerHeld(dt);
+      }
     }
     if (this.free.length) this.updateFree(dt);
     this.touchBodies();
@@ -677,7 +703,7 @@ class WaterBending {
   touchBodies() {
     const s = this.scene;
     const now = s.time.now;
-    for (const target of bendContacts(s, [...this.held, ...this.free])) {
+    for (const target of bendContacts(s, [...this.held, ...this.free.filter((d) => !d.bendRecalling)])) {
       const key = target.id || target.enemy;
       if (!bendHitReady(this.hitCooldowns, key, now, 170)) continue;
       if (target.enemy) target.enemy.wetUntil = now + 450;
@@ -706,7 +732,7 @@ class WaterBending {
   }
 
   pushObjects(dt) {
-    const drops = [...this.held, ...this.free];
+    const drops = [...this.held, ...this.free.filter((d) => !d.bendRecalling)];
     if (!drops.length) return;
     for (const obj of [...this.scene.debris, ...this.scene.projectiles]) {
       const drop = drops.find((d) => Math.hypot(d.x - obj.x, d.y - obj.y) < PIXEL * 3);
@@ -725,7 +751,8 @@ class WaterBending {
   // Lift water out of the grid near the cursor, nearest cells first, up to the rate
   // and the capacity. Only water within reach of the bender can be lifted.
   grab(dt) {
-    if (this.held.length >= BEND.CAPACITY) { this.grabAcc = 0; return; }
+    const capacity = bendCapacity(this.scene, this.element, BEND.CAPACITY);
+    if (this.held.length >= capacity) { this.grabAcc = 0; return; }
     const s = this.scene;
     this.grabAcc += BEND.GRAB_RATE * dt;
     let n = Math.floor(this.grabAcc);
@@ -737,7 +764,7 @@ class WaterBending {
     const pointer = s.input.activePointer;
     const cgx = Math.floor(pointer.worldX / PIXEL), cgy = Math.floor(pointer.worldY / PIXEL);
     for (const [dx, dy] of this.grabOffsets) {
-      if (n <= 0 || this.held.length >= BEND.CAPACITY) break;
+      if (n <= 0 || this.held.length >= capacity) break;
       const x = cgx + dx, y = cgy + dy;
       if (x <= 0 || x >= COLS - 1 || y <= 0 || y >= ROWS - 1) continue;
       const id = s.idx(x, y);
@@ -803,7 +830,7 @@ class WaterBending {
     const s = this.scene;
     for (let i = this.free.length - 1; i >= 0; i--) {
       const d = this.free[i];
-      if (d.bendAbility) continue; // whip/shield own movement; reactions can still consume the drop
+      if (d.bendAbility || d.bendRecalling) continue;
       d.age += dt;
       d.vy += BEND.GRAVITY * dt;
       d.vx *= 1 - Math.min(1, 0.4 * dt);
@@ -844,7 +871,8 @@ class WaterBending {
       const m = s.grid[id];
       if (m === FIRE) { bendSteam(s, d.x, d.y); return 'consumed'; }
       if (m === LAVA) { s.setCell(id, STONE); return 'consumed'; }
-      if (d.punched) this.touchPunchDrop(d);
+      if (s.bendAbilities?.interceptParticle(d, d.x - sx, d.y - sy)) return 'ok';
+      if (d.punched || d.attackPower > 1) this.touchPunchDrop(d);
       if (blocked) break;
     }
     return blocked ? 'blocked' : 'ok';
@@ -982,9 +1010,11 @@ class EarthBending {
   punch() {
     if (!this.rock || !this.holding) return false;
     const s = this.scene;
+    const shot = bendShot(s, this.element);
     const p = s.player;
     const cx = p.x + p.w / 2, cy = p.y + p.h / 2;
     const rock = this.rock;
+    delete rock.defensiveCaught;
     // Pieces already lifted from terrain belong to this attack even if they
     // had not reached their slots yet. Fusing them preserves their cell count.
     for (const piece of this.pieces) {
@@ -1000,9 +1030,9 @@ class EarthBending {
         const x = cx + cell.ox * PIXEL, y = cy + cell.oy * PIXEL;
         const dir = bendOutward(x, y, cx, cy, i, count, this.spin || 0);
         this.thrown.push({
-          x, y, vx: dir.x * EARTH_BEND.FRAGMENT_SPEED,
-          vy: dir.y * EARTH_BEND.FRAGMENT_SPEED,
-          age: 0, punched: true, fragment: true,
+          x, y, vx: dir.x * EARTH_BEND.FRAGMENT_SPEED * shot.speed,
+          vy: dir.y * EARTH_BEND.FRAGMENT_SPEED * shot.speed,
+          age: 0, punched: true, fragment: true, attackPower: shot.power,
           cells: [{ ox: 0, oy: 0, shade: cell.shade }],
         });
       }
@@ -1012,8 +1042,9 @@ class EarthBending {
         { speed: 180, life: 0.5, size: 1.4 });
     } else {
       const aim = bendAim(s);
-      rock.vx = aim.x * EARTH_BEND.PUNCH_SPEED;
-      rock.vy = aim.y * EARTH_BEND.PUNCH_SPEED;
+      rock.vx = aim.x * EARTH_BEND.PUNCH_SPEED * shot.speed;
+      rock.vy = aim.y * EARTH_BEND.PUNCH_SPEED * shot.speed;
+      rock.attackPower = shot.power;
       rock.age = 0;
       rock.punched = true;
       this.thrown.push(rock);
@@ -1029,15 +1060,22 @@ class EarthBending {
     const t = bendTarget(this.scene, EARTH_BEND.REACH);
     this.active = true;
     this.grabAcc = 0;
+    if (this.rock?.defensiveCaught || (this.rock && this.scene.attackControl?.keeps(this.element))) {
+      delete this.rock.defensiveCaught; return;
+    }
     this.rock = { x: t.x, y: t.y, vx: 0, vy: 0, cells: [], nextSlot: 0 };
   }
 
   // Bolt lets go of one flying boulder (thrown). Orbit has no boulder to throw
   // — letting go scatters the ring's own stones outward, each one landing
   // where it falls rather than flying on together.
-  release() {
+  release(force = false) {
     if (!this.active && !this.rock) return;
     this.active = false;
+    if (!force && this.scene.attackControl?.keeps(this.element)) return;
+    if (!force && this.rock?.defensiveCaught && this.scene.leftClickMode === 'bend'
+      && this.scene.bendElement === 'Earth' && !this.scene.player.dead) return;
+    const shot = bendReleasePower(this.scene, this.element), aim = bendAim(this.scene);
     if (this.rock && this.rock.cells.length) {
       if (this.form === 'Orbit') {
         const M = PixelWorld.MAT;
@@ -1045,12 +1083,17 @@ class EarthBending {
           const d = Math.max(1, Math.hypot(c.ox, c.oy));
           this.loosePieces.push({
             x: this.rock.x + c.ox * PIXEL, y: this.rock.y + c.oy * PIXEL,
-            vx: (c.ox / d) * ORBIT.RELEASE_KICK, vy: (c.oy / d) * ORBIT.RELEASE_KICK,
+            vx: (c.ox / d) * ORBIT.RELEASE_KICK * shot.speed, vy: (c.oy / d) * ORBIT.RELEASE_KICK * shot.speed,
             mat: M.STONE, variant: c.shade, age: 0,
           });
         }
       } else {
         this.rock.age = 0;
+        this.rock.attackPower = shot.power;
+        if (shot.charge) {
+          this.rock.vx = aim.x * EARTH_BEND.PUNCH_SPEED * 0.7 * shot.speed;
+          this.rock.vy = aim.y * EARTH_BEND.PUNCH_SPEED * 0.7 * shot.speed;
+        }
         this.thrown.push(this.rock);
       }
     }
@@ -1063,10 +1106,15 @@ class EarthBending {
 
   update(dt) {
     if (this.active && !bendSelected(this.scene, this.element)) this.release();
+    if (this.rock?.defensiveCaught && (this.scene.player.dead || this.scene.leftClickMode !== 'bend'
+      || this.scene.bendElement !== 'Earth')) this.release(true);
     if (this.active) this.grab(dt);
     if (this.rock) {
       this.flyPieces(dt);
-      if (this.form === 'Orbit') this.steerOrbitRock(dt); else this.steerRock(dt);
+      if (!bendHoldingPaused(this.scene, this.element)
+        && !(this.rock.defensiveCaught && (this.scene.wheelOpen || this.scene.bendWheelOpen))) {
+        if (this.form === 'Orbit') this.steerOrbitRock(dt); else this.steerRock(dt);
+      }
     }
     if (this.thrown.length) this.updateThrown(dt);
     if (this.loosePieces.length) this.updateLoose(dt);
@@ -1078,7 +1126,8 @@ class EarthBending {
     const now = s.time.now;
     if (impactSpeed < 65 && this.form !== 'Orbit') return;
     const points = rock.cells.map((c) => ({ x: rock.x + c.ox * PIXEL, y: rock.y + c.oy * PIXEL }));
-    const damage = Math.min(24, 4 + Math.sqrt(rock.cells.length) * 1.1 + impactSpeed * 0.018);
+    const damage = Math.min(40, Math.min(24, 4 + Math.sqrt(rock.cells.length) * 1.1 + impactSpeed * 0.018)
+      * (rock.attackPower || 1));
     this.strikeObjects(rock, points, impactSpeed);
     for (const target of bendContacts(s, points, PIXEL * 1.4)) {
       const key = target.id || target.enemy;
@@ -1211,7 +1260,8 @@ class EarthBending {
   grab(dt) {
     const s = this.scene;
     const rock = this.rock;
-    if (this.holding >= EARTH_BEND.CAPACITY) { this.grabAcc = 0; return; }
+    const capacity = bendCapacity(s, this.element, EARTH_BEND.CAPACITY);
+    if (this.holding >= capacity) { this.grabAcc = 0; return; }
     this.grabAcc += EARTH_BEND.GRAB_RATE * dt;
     if (this.grabAcc < 1) return;
 
@@ -1222,7 +1272,7 @@ class EarthBending {
     const pointer = s.input.activePointer;
     const cgx = Math.floor(pointer.worldX / PIXEL), cgy = Math.floor(pointer.worldY / PIXEL);
     for (const [dx, dy] of this.grabOffsets) {
-      if (this.holding >= EARTH_BEND.CAPACITY) break;
+      if (this.holding >= capacity) break;
       const x = cgx + dx, y = cgy + dy;
       if (x <= 0 || x >= COLS - 1 || y <= 0 || y >= ROWS - 1) continue;
       if (x >= fx0 && x <= fx1 && y >= feet && y < feet + EARTH_BEND.FOOTING) continue;
@@ -1272,7 +1322,7 @@ class EarthBending {
   // pebble whips around and a boulder lumbers.
   steerRock(dt) {
     const rock = this.rock;
-    const t = bendTarget(this.scene, EARTH_BEND.REACH);
+    const t = this.scene.attackControl?.holdingTarget(this.element) || bendTarget(this.scene, EARTH_BEND.REACH);
     const mass = rock.cells.length / EARTH_BEND.CAPACITY;
     const max = EARTH_BEND.MAX_SPEED * (1 - EARTH_BEND.HEAVY_SLOWDOWN * mass);
     let wx = (t.x - rock.x) * EARTH_BEND.FOLLOW, wy = (t.y - rock.y) * EARTH_BEND.FOLLOW;
@@ -1342,6 +1392,7 @@ class EarthBending {
   updateThrown(dt) {
     for (let i = this.thrown.length - 1; i >= 0; i--) {
       const rock = this.thrown[i];
+      if (rock.bendRecalling) continue;
       // Let go while buried in the ground: it simply stays there.
       if (rock.age === 0 && rock.cells.every((c) => this.solidAt(rock.x + c.ox * PIXEL, rock.y + c.oy * PIXEL))) {
         this.stamp(rock);
@@ -1352,6 +1403,7 @@ class EarthBending {
       rock.vy += EARTH_BEND.GRAVITY * dt;
       rock.vx *= 1 - Math.min(1, 0.3 * dt);
       const hit = this.moveRock(rock, dt, 'thrown');
+      if (hit.caught) { this.thrown.splice(i, 1); continue; }
       if (hit.down || rock.age > EARTH_BEND.FREE_LIFE) {
         this.stamp(rock);
         this.thrown.splice(i, 1);
@@ -1369,6 +1421,11 @@ class EarthBending {
     for (let k = 0; k < steps; k++) {
       const impactSpeed = Math.hypot(rock.vx, rock.vy);
       const sx = (rock.vx * dt) / steps, sy = (rock.vy * dt) / steps;
+      if (mode === 'thrown') {
+        const defense = this.scene.bendAbilities?.interceptRock(rock, rock.x, rock.y, rock.x + sx, rock.y + sy);
+        if (defense === 'caught') { hit.caught = true; break; }
+        if (defense === 'deflected') break;
+      }
       if (sx) {
         if (this.rockCollides(rock, sx, 0, mode)) { hit.side = true; rock.vx = 0; } else rock.x += sx;
       }
@@ -1471,11 +1528,13 @@ class EarthBending {
   updateLoose(dt) {
     for (let i = this.loosePieces.length - 1; i >= 0; i--) {
       const pc = this.loosePieces[i];
+      if (pc.bendRecalling) continue;
       pc.age += dt;
       pc.vy += EARTH_BEND.GRAVITY * dt;
       const steps = Math.max(1, Math.ceil(Math.max(Math.abs(pc.vx), Math.abs(pc.vy)) * dt / PIXEL));
       let landed = false;
       for (let k = 0; k < steps && !landed; k++) {
+        const fromX = pc.x, fromY = pc.y;
         const nx = pc.x + pc.vx * dt / steps;
         if (this.solidAt(nx, pc.y)) pc.vx *= -0.15; else pc.x = nx;
         const ny = pc.y + pc.vy * dt / steps;
@@ -1483,7 +1542,11 @@ class EarthBending {
           landed = pc.vy >= 0;
           pc.vy = 0;
         } else pc.y = ny;
+        const defense = this.scene.bendAbilities?.interceptDebris(pc, fromX, fromY);
+        if (defense === 'caught') { pc.bendCaught = true; break; }
+        if (defense === 'deflected') break;
       }
+      if (pc.bendCaught) { this.loosePieces.splice(i, 1); continue; }
       if (landed || pc.age > EARTH_BEND.FREE_LIFE) {
         this.putNear(Math.floor(pc.x / PIXEL), Math.floor(pc.y / PIXEL), pc.mat, pc.variant);
         this.loosePieces.splice(i, 1);
@@ -1586,19 +1649,22 @@ class FireBending {
   // Let go of everything held. Bolt's embers keep their velocity, which is the
   // throw; Orbit's get an outward kick instead, so letting go of a ring reads
   // as releasing it rather than an arbitrary scatter.
-  release() {
+  release(force = false) {
     if (!this.active && !this.held.length) return;
     this.active = false;
+    if (!force && this.scene.attackControl?.keeps(this.element)) return;
+    const shot = bendReleasePower(this.scene, this.element), aim = bendAim(this.scene);
     const p = this.scene.player;
     const cx = p.x + p.w / 2, cy = p.y + p.h / 2;
     for (const d of this.held) {
       d.age = 0;
+      d.attackPower = shot.power;
       if (this.form === 'Orbit') {
         const dx = d.x - cx, dy = d.y - cy;
         const dist = Math.max(1, Math.hypot(dx, dy));
-        d.vx += (dx / dist) * ORBIT.RELEASE_KICK;
-        d.vy += (dy / dist) * ORBIT.RELEASE_KICK;
-      }
+        d.vx += (dx / dist) * ORBIT.RELEASE_KICK * shot.speed;
+        d.vy += (dy / dist) * ORBIT.RELEASE_KICK * shot.speed;
+      } else if (shot.charge) { d.vx = aim.x * FIRE_BEND.MAX_SPEED * shot.speed; d.vy = aim.y * FIRE_BEND.MAX_SPEED * shot.speed; }
       this.free.push(d);
     }
     this.held.length = 0;
@@ -1616,6 +1682,7 @@ class FireBending {
     const p = s.player;
     const cx = p.x + p.w / 2, cy = p.y + p.h / 2;
     const count = this.held.length;
+    const shot = bendShot(s, this.element);
     if (this.form === 'Orbit') {
       const phase = this.spin || 0;
       for (let i = 0; i < count; i++) {
@@ -1624,15 +1691,16 @@ class FireBending {
         const angle = distance > 1
           ? Math.atan2(ember.y - cy, ember.x - cx)
           : phase + i * Math.PI * 2 / count;
-        ember.vx = Math.cos(angle) * FIRE_BEND.PUNCH_KICK;
-        ember.vy = Math.sin(angle) * FIRE_BEND.PUNCH_KICK;
+        ember.vx = Math.cos(angle) * FIRE_BEND.PUNCH_KICK * shot.speed;
+        ember.vy = Math.sin(angle) * FIRE_BEND.PUNCH_KICK * shot.speed;
+        ember.attackPower = shot.power;
         ember.age = 0;
         this.free.push(ember);
       }
       this.held.length = 0;
       const radius = ORBIT.RADIUS + 12;
-      this.damageBurst(cx, cy, radius, Math.min(26, 5 + count * 0.14));
-      this.burnDebris(cx, cy, radius, 0.15 + Math.sqrt(count) * 0.05);
+      this.damageBurst(cx, cy, radius, Math.min(42, Math.min(26, 5 + count * 0.14) * shot.power));
+      this.burnDebris(cx, cy, radius, (0.15 + Math.sqrt(count) * 0.05) * shot.power);
       s.fx.shockwave(cx, cy, 'Fire',
         { r0: ORBIT.RADIUS * 0.35, r1: radius * 1.7, life: 0.38, width: 3, rings: 2 });
       s.fx.burst(cx, cy, Math.min(35, 8 + count / 3), 'Fire',
@@ -1646,7 +1714,7 @@ class FireBending {
       const dist = Math.hypot(dx, dy);
       const ux = dist > 1 ? dx / dist : (p.facing || 1);
       const uy = dist > 1 ? dy / dist : 0;
-      const size = Math.min(16, 5 + Math.sqrt(count) * 0.85);
+      const size = Math.min(20, (5 + Math.sqrt(count) * 0.85) * (1 + shot.charge * 0.2));
       const embers = [];
       const visualCount = Math.max(12, Math.min(96, count));
       for (let i = 0; i < visualCount; i++) {
@@ -1662,8 +1730,8 @@ class FireBending {
         });
       }
       this.fireballs.push({
-        x, y, vx: ux * FIRE_BEND.BALL_SPEED, vy: uy * FIRE_BEND.BALL_SPEED,
-        size, mass: count, life: FIRE_BEND.BALL_LIFE, age: 0, trail: 0, embers,
+        x, y, vx: ux * FIRE_BEND.BALL_SPEED * shot.speed, vy: uy * FIRE_BEND.BALL_SPEED * shot.speed,
+        size, mass: count, attackPower: shot.power, life: FIRE_BEND.BALL_LIFE, age: 0, trail: 0, embers,
       });
       this.held.length = 0;
       s.fx.burst(x, y, 20, 'Fire', { speed: 110, life: 0.42, size: 1.5, shape: 'square' });
@@ -1728,7 +1796,7 @@ class FireBending {
   explodeFireball(ball, radius, heat) {
     const s = this.scene;
     const reach = radius * PIXEL * 1.4;
-    const power = Math.min(9, 1.2 + Math.sqrt(ball.mass) * 0.5);
+    const power = Math.min(14, (1.2 + Math.sqrt(ball.mass) * 0.5) * (ball.attackPower || 1));
     const speed = Math.hypot(ball.vx, ball.vy);
     // Back up one flight substep so a wall impact originates outside the wall.
     const ox = ball.x - (speed > 0 ? ball.vx / speed * PIXEL : 0);
@@ -1794,13 +1862,13 @@ class FireBending {
 
   impactFireball(ball, doused = false) {
     const s = this.scene;
-    const radius = Math.min(14, Math.round(3 + Math.sqrt(ball.mass) * 0.8));
+    const radius = Math.min(16, Math.round((3 + Math.sqrt(ball.mass) * 0.8) * (1 + ((ball.attackPower || 1) - 1) * 0.2)));
     if (!doused) {
-      const heat = Math.min(0.9, 0.15 + Math.sqrt(ball.mass) * 0.06);
+      const heat = Math.min(1.4, (0.15 + Math.sqrt(ball.mass) * 0.06) * (ball.attackPower || 1));
       this.explodeFireball(ball, radius, heat);
       this.igniteBurst(ball.x, ball.y, radius, heat, Math.min(24, Math.ceil(ball.mass / 6)));
       this.damageBurst(ball.x, ball.y, radius * PIXEL * 1.4,
-        Math.min(36, 9 + ball.mass * 0.2));
+        Math.min(48, Math.min(36, 9 + ball.mass * 0.2) * (ball.attackPower || 1)));
     }
     s.fx.burst(ball.x, ball.y, Math.min(70, 20 + ball.mass / 2),
       doused ? 'Water' : 'Fire', { speed: 170, life: 0.65, rise: 35, size: 1.5,
@@ -1860,6 +1928,7 @@ class FireBending {
     const s = this.scene;
     for (let i = this.fireballs.length - 1; i >= 0; i--) {
       const ball = this.fireballs[i];
+      if (ball.bendRecalling) continue;
       if (ball.doused || ball.earthBlocked || bendCoolBallInWater(s, ball)) {
         this.impactFireball(ball, !!ball.doused);
         this.fireballs.splice(i, 1);
@@ -1869,10 +1938,10 @@ class FireBending {
       ball.age += dt;
       const fromX = ball.x, fromY = ball.y;
       const steps = Math.max(1, Math.ceil(Math.max(Math.abs(ball.vx), Math.abs(ball.vy)) * dt / PIXEL));
-      const sx = ball.vx * dt / steps, sy = ball.vy * dt / steps;
       let impact = false, doused = false;
       for (let k = 0; k < steps; k++) {
-        ball.x += sx; ball.y += sy;
+        const stepFromX = ball.x, stepFromY = ball.y;
+        ball.x += ball.vx * dt / steps; ball.y += ball.vy * dt / steps;
         const gx = Math.floor(ball.x / PIXEL), gy = Math.floor(ball.y / PIXEL);
         if (gx <= 0 || gx >= COLS - 1 || gy <= 0 || gy >= ROWS - 1) {
           impact = true; doused = true; break;
@@ -1883,6 +1952,7 @@ class FireBending {
           impact = true; doused = true; break;
         }
         if (IS_SOLID[mat]) { impact = true; break; }
+        if (s.bendAbilities?.interceptFireball(ball, stepFromX, stepFromY)) break;
         if (bendEarthContact(s, ball.x, ball.y, ball.size)) { impact = true; break; }
         if (bendCoolBallInWater(s, ball)) { impact = true; doused = true; break; }
         if (s.debris.some((obj) => Math.hypot(obj.x - ball.x, obj.y - ball.y) <= ball.size + PIXEL)) {
@@ -1903,7 +1973,7 @@ class FireBending {
   }
 
   target() {
-    return bendTarget(this.scene, FIRE_BEND.REACH);
+    return this.scene.attackControl?.holdingTarget(this.element) || bendTarget(this.scene, FIRE_BEND.REACH);
   }
 
   update(dt) {
@@ -1920,7 +1990,10 @@ class FireBending {
       }
     }
     if (this.held.length) {
-      if (this.form === 'Orbit') this.steerOrbit(dt); else this.steerHeld(dt);
+      if (bendHoldingPaused(this.scene, this.element)) {
+        for (const ember of this.held) ember.life -= dt;
+        this.held = this.held.filter((ember) => ember.life > 0);
+      } else if (this.form === 'Orbit') this.steerOrbit(dt); else this.steerHeld(dt);
     }
     if (this.free.length) this.updateFree(dt);
     if (this.fireballs.length) this.updateFireballs(dt);
@@ -1932,14 +2005,17 @@ class FireBending {
   touchBodies() {
     const s = this.scene;
     const now = s.time.now;
-    for (const target of bendContacts(s, [...this.held, ...this.free])) {
+    const embers = [...this.held, ...this.free.filter((d) => !d.bendRecalling)];
+    for (const target of bendContacts(s, embers)) {
       const key = target.id || target.enemy;
       if (!bendHitReady(this.hitCooldowns, key, now, 230)) continue;
+      const power = embers.filter((d) => bendBodyWithin(target.body, d.x, d.y, PIXEL))
+        .reduce((value, d) => Math.max(value, d.attackPower || 1), 1);
       if (target.enemy) {
-        s.damageEnemy(target.enemy, 3, 'Fire');
+        s.damageEnemy(target.enemy, 3 * power, 'Fire');
         target.enemy.burnUntil = now + 1200;
       } else {
-        s.reportHit(target.id, 'Fire', 3, null, { burnMs: 1200 });
+        s.reportHit(target.id, 'Fire', 3 * power, null, { burnMs: 1200 });
       }
       s.fx.burst(target.body.x + target.body.w / 2, target.body.y + 3,
         5, 'Fire', { speed: 45, life: 0.4, rise: 55, size: 1.3 });
@@ -1953,12 +2029,12 @@ class FireBending {
       let ember = null;
       let list = null;
       for (const particles of [this.held, this.free]) {
-        const found = particles.findIndex((d) => Math.hypot(d.x - obj.x, d.y - obj.y) < PIXEL * 2);
+        const found = particles.findIndex((d) => !d.bendRecalling && Math.hypot(d.x - obj.x, d.y - obj.y) < PIXEL * 2);
         if (found >= 0) { ember = found; list = particles; break; }
       }
       if (!list) continue;
-      list.splice(ember, 1);
-      this.surfaceDamage.object(obj, 0.08, 'Fire');
+      const [particle] = list.splice(ember, 1);
+      this.surfaceDamage.object(obj, 0.08 * (particle.attackPower || 1), 'Fire');
     }
   }
 
@@ -1966,7 +2042,8 @@ class FireBending {
   // cursor, so fire visibly travels from the body instead of appearing at aim.
   // Nothing is removed from the world when they are created.
   grab(dt) {
-    if (this.held.length >= FIRE_BEND.CAPACITY) { this.grabAcc = 0; return; }
+    const capacity = bendCapacity(this.scene, this.element, FIRE_BEND.CAPACITY);
+    if (this.held.length >= capacity) { this.grabAcc = 0; return; }
     const s = this.scene;
     this.grabAcc += FIRE_BEND.CONJURE_RATE * dt;
     let n = Math.floor(this.grabAcc);
@@ -1979,7 +2056,7 @@ class FireBending {
     const target = this.target();
     const dx = target.x - sourceX, dy = target.y - sourceY;
     const dist = Math.max(1, Math.hypot(dx, dy));
-    n = Math.min(n, FIRE_BEND.CAPACITY - this.held.length);
+    n = Math.min(n, capacity - this.held.length);
     for (let i = 0; i < n; i++) {
       this.held.push({
         x: sourceX + (Math.random() - 0.5) * 2,
@@ -2044,6 +2121,7 @@ class FireBending {
   updateFree(dt) {
     for (let i = this.free.length - 1; i >= 0; i--) {
       const d = this.free[i];
+      if (d.bendRecalling) continue;
       d.age += dt;
       d.vy += FIRE_BEND.GRAVITY * dt;
       d.vx *= 1 - Math.min(1, 0.3 * dt);
@@ -2087,6 +2165,7 @@ class FireBending {
         bendSteam(s, d.x, d.y);
         return 'consumed';
       }
+      if (s.bendAbilities?.interceptParticle(d, d.x - sx, d.y - sy)) return 'ok';
       if (d.flameJet && this.touchJet(d)) return 'consumed';
       if (this.igniteCell(gx, gy, dt * 1.6)) return 'consumed';
       const obj = s.debris.find((o) => Math.hypot(o.x - d.x, o.y - d.y) < PIXEL * 2
@@ -2258,19 +2337,22 @@ class AirBending {
   // Let go of everything held. Bolt's wisps keep their velocity, which is the
   // throw; Orbit's get an outward kick instead, so letting go of a ring reads
   // as releasing it rather than an arbitrary scatter.
-  release() {
+  release(force = false) {
     if (!this.active && !this.held.length) return;
     this.active = false;
+    if (!force && this.scene.attackControl?.keeps(this.element)) return;
+    const shot = bendReleasePower(this.scene, this.element), aim = bendAim(this.scene);
     const p = this.scene.player;
     const cx = p.x + p.w / 2, cy = p.y + p.h / 2;
     for (const d of this.held) {
       d.age = 0;
+      d.attackPower = shot.power;
       if (this.form === 'Orbit') {
         const dx = d.x - cx, dy = d.y - cy;
         const dist = Math.max(1, Math.hypot(dx, dy));
-        d.vx += (dx / dist) * ORBIT.RELEASE_KICK;
-        d.vy += (dy / dist) * ORBIT.RELEASE_KICK;
-      }
+        d.vx += (dx / dist) * ORBIT.RELEASE_KICK * shot.speed;
+        d.vy += (dy / dist) * ORBIT.RELEASE_KICK * shot.speed;
+      } else if (shot.charge) { d.vx = aim.x * AIR_BEND.MAX_SPEED * shot.speed; d.vy = aim.y * AIR_BEND.MAX_SPEED * shot.speed; }
       this.free.push(d);
     }
     this.held.length = 0;
@@ -2286,11 +2368,12 @@ class AirBending {
     const p = s.player;
     const cx = p.x + p.w / 2, cy = p.y + p.h / 2;
     const count = this.held.length;
+    const shot = bendShot(s, this.element);
     if (this.form === 'Orbit') {
       this.held.length = 0;
       this.rings.push({ x: cx, y: cy, radius: 24,
-        strength: Math.min(440, 230 + count * 2) });
-      this.gust(cx, cy, 30, 115);
+        strength: Math.min(700, Math.min(440, 230 + count * 2) * shot.power) });
+      this.gust(cx, cy, 30, 115 * shot.power);
       s.fx.shockwave(cx, cy, 'Air',
         { r0: 18, r1: AIR_BEND.RING_RANGE, life: 0.34, width: 4, rings: 2 });
       s.fx.burst(cx, cy, Math.min(36, 8 + count / 3), 'Air',
@@ -2300,8 +2383,9 @@ class AirBending {
       const id = ++this.nextJetId;
       this.jetDirections.set(id, aim);
       for (const wisp of this.held) {
-        wisp.vx = aim.x * AIR_BEND.PUNCH_SPEED;
-        wisp.vy = aim.y * AIR_BEND.PUNCH_SPEED;
+        wisp.vx = aim.x * AIR_BEND.PUNCH_SPEED * shot.speed;
+        wisp.vy = aim.y * AIR_BEND.PUNCH_SPEED * shot.speed;
+        wisp.attackPower = shot.power;
         wisp.age = 0;
         wisp.jetId = id;
         this.free.push(wisp);
@@ -2314,7 +2398,7 @@ class AirBending {
   }
 
   target() {
-    return bendTarget(this.scene, AIR_BEND.REACH);
+    return this.scene.attackControl?.holdingTarget(this.element) || bendTarget(this.scene, AIR_BEND.REACH);
   }
 
   update(dt) {
@@ -2328,14 +2412,20 @@ class AirBending {
       // cluster every frame regardless of where that cluster is, so pinning it
       // to a ring around the bender instead of the cursor is the only change
       // Orbit form needs here.
-      if (this.form === 'Orbit') this.steerOrbit(dt); else this.steerHeld(dt);
-      this.groupPush(this.held, AIR_BEND.HOLD_ACCEL * dt);
+      if (bendHoldingPaused(this.scene, this.element)) {
+        for (const wisp of this.held) wisp.life -= dt;
+        this.held = this.held.filter((wisp) => wisp.life > 0);
+      } else {
+        if (this.form === 'Orbit') this.steerOrbit(dt); else this.steerHeld(dt);
+        this.groupPush(this.held, AIR_BEND.HOLD_ACCEL * dt);
+      }
     }
     if (this.free.length) {
       this.updateFree(dt);
       const ordinary = [];
       const jets = new Map();
       for (const wisp of this.free) {
+        if (wisp.bendRecalling) continue;
         if (!wisp.jetId) ordinary.push(wisp);
         else {
           if (!jets.has(wisp.jetId)) jets.set(wisp.jetId, []);
@@ -2372,7 +2462,8 @@ class AirBending {
   // rate and the capacity. Nothing is taken from the world — there is no
   // "air" cell to remove.
   grab(dt) {
-    if (this.held.length >= AIR_BEND.CAPACITY) { this.grabAcc = 0; return; }
+    const capacity = bendCapacity(this.scene, this.element, AIR_BEND.CAPACITY);
+    if (this.held.length >= capacity) { this.grabAcc = 0; return; }
     const s = this.scene;
     this.grabAcc += AIR_BEND.CONJURE_RATE * dt;
     let n = Math.floor(this.grabAcc);
@@ -2384,7 +2475,7 @@ class AirBending {
     const pointer = s.input.activePointer;
     const cgx = Math.floor(pointer.worldX / PIXEL), cgy = Math.floor(pointer.worldY / PIXEL);
     for (const [dx, dy] of this.grabOffsets) {
-      if (n <= 0 || this.held.length >= AIR_BEND.CAPACITY) break;
+      if (n <= 0 || this.held.length >= capacity) break;
       const x = cgx + dx, y = cgy + dy;
       if (x <= 0 || x >= COLS - 1 || y <= 0 || y >= ROWS - 1) continue;
       if (Math.hypot(x - pgx, y - pgy) > AIR_BEND.REACH) continue;
@@ -2448,6 +2539,7 @@ class AirBending {
   updateFree(dt) {
     for (let i = this.free.length - 1; i >= 0; i--) {
       const d = this.free[i];
+      if (d.bendRecalling) continue;
       d.age += dt;
       d.vy -= AIR_BEND.LOFT * dt;
       d.vx *= 1 - Math.min(1, AIR_BEND.DRAG * dt);
@@ -2510,7 +2602,8 @@ class AirBending {
     for (const d of list) { sx += d.x; sy += d.y; }
     const cx = sx / list.length, cy = sy / list.length;
     const radiusPx = AIR_BEND.SPACING * PIXEL * Math.sqrt(list.length) + AIR_BEND.PUSH_PAD;
-    this.gust(cx, cy, radiusPx, strength, direction);
+    const power = list.reduce((value, wisp) => Math.max(value, wisp.attackPower || 1), 1);
+    this.gust(cx, cy, radiusPx, strength * power, direction);
   }
 
   // Pushes bodies and loose objects away from the gust, including the caster.

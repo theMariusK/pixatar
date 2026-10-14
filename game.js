@@ -69,14 +69,16 @@ const BEND_ACTIONS = ['Punch', 'Normal'];
 const BEND_ELEMENT_ACTIONS = {
   Fire: [...BEND_ACTIONS, 'Flamethrower'],
   Water: [...BEND_ACTIONS, 'Whip', 'Shield'],
-  Earth: [...BEND_ACTIONS, 'Wall', 'Spikes'],
-  Air: [...BEND_ACTIONS, 'Dash', 'Vortex'],
+  Earth: [...BEND_ACTIONS, 'Wall', 'Spikes', 'Catch'],
+  Air: [...BEND_ACTIONS, 'Dash', 'Vortex', 'Deflect'],
 };
 const BEND_ABILITY_LABELS = {
   Flamethrower: 'hold RMB: flamethrower', Whip: 'RMB: water whip · gather water first',
   Shield: 'hold RMB: water shield · gather water first', Wall: 'RMB: earth wall · gather earth first',
   Spikes: 'RMB: earth spikes · gather earth first', Dash: 'RMB: air dash · gather air first',
   Vortex: 'RMB: vortex · gather air first; hold to steer',
+  Catch: 'hold RMB: catch incoming earth · press again to throw',
+  Deflect: 'hold RMB: deflect toward mouse · gather air first',
 };
 const BEND_ACTION_RING = { rMin: 114, rMax: 149 };
 const BEND_RINGS = [
@@ -181,6 +183,7 @@ class SandScene extends Phaser.Scene {
       Fire: new FireBending(this), Air: new AirBending(this),
     };
     this.bendAbilities = new BendingAbilities(this);
+    this.attackControl = new BendingAttackControl(this);
     this.bendElement = 'Water';
     // Each element remembers its shape and action in the Q picker.
     this.bendStyle = { Water: 'Bolt', Earth: 'Bolt', Fire: 'Bolt', Air: 'Bolt' };
@@ -278,12 +281,16 @@ class SandScene extends Phaser.Scene {
       q: Phaser.Input.Keyboard.KeyCodes.Q,
       e: Phaser.Input.Keyboard.KeyCodes.E,
       b: Phaser.Input.Keyboard.KeyCodes.B,
+      c: Phaser.Input.Keyboard.KeyCodes.C,
+      v: Phaser.Input.Keyboard.KeyCodes.V,
+      shift: Phaser.Input.Keyboard.KeyCodes.SHIFT,
       esc: Phaser.Input.Keyboard.KeyCodes.ESC,
     });
 
     this.cameras.main.setBounds(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
 
     this.input.mouse.disableContextMenu();
+    this.input.on('wheel', (_pointer, _objects, _dx, dy) => this.attackControl.adjustSize(-Math.sign(dy)));
 
     this.input.keyboard.on('keydown-F', () => {
       if (this.scale.isFullscreen) this.scale.stopFullscreen();
@@ -390,6 +397,7 @@ class SandScene extends Phaser.Scene {
   // ---------- world (rules live in world.js) ----------
 
   generateWorld(seed) {
+    this.attackControl?.clear();
     this.bendAbilities?.clear();
     this.bendingDamage?.clear();
     const info = PixelWorld.generateWorld(this.world, seed, { bodyScale: CHAR_SCALE, stepUpCells: STEP_UP_CELLS });
@@ -677,7 +685,8 @@ class SandScene extends Phaser.Scene {
       const n = this.benders[this.bendElement].holding;
       const form = this.bendStyle[this.bendElement];
       const action = ` + ${this.bendAction[this.bendElement]}`;
-      return `bend ${this.bendElement.toLowerCase()} · ${form}${action}${n ? `  (holding ${n})` : ''}   [Q: element/shape/action] [B: dig]`;
+      const control = this.attackControl ? ` · ${this.attackControl.readout()}\n[Shift: charge] [wheel: size] [C: hold] [V: recall]` : '';
+      return `bend ${this.bendElement.toLowerCase()} · ${form}${action}${n ? `  (holding ${n})` : ''}   [Q: element/shape/action] [B: dig]${control}`;
     }
     return `dig   [Q: select bend] [B: bend ${this.bendElement.toLowerCase()}]`;
   }
@@ -690,7 +699,8 @@ class SandScene extends Phaser.Scene {
       const action = this.bendAction[this.bendElement];
       const remaining = this.bendAbilities?.remaining(action) || 0;
       const hint = this.bendAbilities?.hintUntil > this.time.now ? ` · ${this.bendAbilities.hint}` : '';
-      return `${BEND_ABILITY_LABELS[action]}${remaining ? ` · ${remaining.toFixed(1)}s cooldown` : ''}${hint}`;
+      const guard = this.bendAbilities?.defenseReadout?.(action);
+      return `${BEND_ABILITY_LABELS[action]}${guard ? ` · ${guard}` : ''}${remaining ? ` · ${remaining.toFixed(1)}s cooldown` : ''}${hint}`;
     }
     return this.rightClickMode === 'secondary' ? describe('secondary') : 'unused';
   }
@@ -1357,6 +1367,7 @@ class SandScene extends Phaser.Scene {
   }
 
   handleRigidFallImpact(hit) {
+    if (this.bendAbilities?.interceptRigid(hit)) return;
     const amount = PixelWorld.impactDamage(hit.speed, hit.mat);
     if (amount <= 0) return;
     for (const body of this.fallingBodies()) {
@@ -1456,6 +1467,9 @@ class SandScene extends Phaser.Scene {
       const movementBlocked = sweep.blocked;
       const leftWorld = sweep.outOfBounds;
       d.x = sweep.x; d.y = sweep.y;
+      const defense = this.bendAbilities?.interceptDebris(d, fromX, fromY);
+      if (defense === 'caught') { this.debris.splice(i, 1); continue; }
+      if (defense === 'deflected') continue;
       const gx = Math.floor(d.x / PIXEL), gy = Math.floor(d.y / PIXEL);
 
       if (d.tkArm > 0) d.tkArm -= dt;
@@ -2309,7 +2323,10 @@ class SandScene extends Phaser.Scene {
     const gy = Math.floor(p.worldY / PIXEL);
 
     const leftJustDown = p.leftButtonDown() && !this.prevLeftDown;
+    const leftJustUp = !p.leftButtonDown() && this.prevLeftDown;
     const rightJustDown = p.rightButtonDown() && !this.prevRightDown;
+    const action = this.bendAction[this.bendElement];
+    const deferRelease = this.leftClickMode === 'bend' && rightJustDown && action !== 'Normal';
     this.prevLeftDown = p.leftButtonDown();
     this.prevRightDown = p.rightButtonDown();
 
@@ -2319,8 +2336,12 @@ class SandScene extends Phaser.Scene {
     if (this.leftClickMode === 'bend') {
       // Hold to lift water or earth near the cursor and carry it; release to let go.
       const bender = this.benders[this.bendElement];
+      if (leftJustDown) this.attackControl?.onBegin();
       if (p.leftButtonDown() && !bender.active) bender.begin();
-      else if (!p.leftButtonDown()) bender.release();
+      else if (!p.leftButtonDown() && !deferRelease) {
+        if (leftJustUp) this.attackControl?.prepareRelease(this.bendElement);
+        bender.release();
+      }
       const ring = this.bendElement === 'Earth' ? 0xc8a064
         : this.bendElement === 'Fire' ? 0xff6600
         : this.bendElement === 'Air' ? 0xdff5fa
@@ -2348,7 +2369,6 @@ class SandScene extends Phaser.Scene {
     }
 
     // Q's element-specific action owns RMB while bending.
-    const action = this.bendAction[this.bendElement];
     if (this.leftClickMode === 'bend' && action !== 'Normal') {
       this.stopChannel('secondary');
       if (rightJustDown && !this.bendWheelOpen) {
@@ -2366,6 +2386,7 @@ class SandScene extends Phaser.Scene {
       }
       this.brushGfx.lineStyle(1, 0xcc66ff, 0.7).strokeCircle(p.worldX, p.worldY, 6 * PIXEL);
     }
+    if (deferRelease && !p.leftButtonDown()) this.benders[this.bendElement].release();
   }
 
   handleSpellKeys() {
@@ -2499,7 +2520,7 @@ class SandScene extends Phaser.Scene {
     this.wheelPreviewText.setVisible(false);
     this.hideBendWheelLabels();
     const element = WHEEL_ELEMENTS[this.bendElementSel];
-    if (this.bendElement !== element) this.benders[this.bendElement].release();
+    if (this.bendElement !== element) this.benders[this.bendElement].release(true);
     this.bendElement = element;
     this.leftClickMode = 'bend';
     const form = BEND_FORMS[this.bendFormSel];
@@ -2731,6 +2752,24 @@ class SandScene extends Phaser.Scene {
         break;
       case 'Wall':
         for (let i = -1; i <= 1; i++) gfx.fillRect(cx + i * s * 0.6 - s * 0.22, cy - s, s * 0.44, s * 2);
+        break;
+      case 'Catch':
+        gfx.strokeCircle(cx, cy, s * 0.45);
+        gfx.beginPath();
+        gfx.moveTo(cx - s, cy - s);
+        gfx.lineTo(cx - s, cy + s * 0.6);
+        gfx.lineTo(cx, cy + s);
+        gfx.lineTo(cx + s, cy + s * 0.6);
+        gfx.lineTo(cx + s, cy - s);
+        gfx.strokePath();
+        break;
+      case 'Deflect':
+        gfx.beginPath();
+        gfx.moveTo(cx - s, cy + s * 0.6);
+        gfx.lineTo(cx, cy);
+        gfx.lineTo(cx - s * 0.7, cy - s);
+        gfx.strokePath();
+        gfx.fillTriangle(cx - s, cy - s, cx - s * 0.2, cy - s * 0.8, cx - s * 0.9, cy - s * 0.2);
         break;
       case 'Spikes':
         for (let i = -1; i <= 1; i++) gfx.fillTriangle(cx + i * s * 0.65 - s * 0.3, cy + s * 0.7,
@@ -3310,6 +3349,7 @@ class SandScene extends Phaser.Scene {
 
     this.updateSpellWheel();
     this.updateBendWheel();
+    this.attackControl.update(dt);
     this.handlePointer();
     this.bendAbilities.update(dt);
     // Every bender updates, not just the selected one: water, rock and embers
@@ -3337,6 +3377,7 @@ class SandScene extends Phaser.Scene {
     this.drawDebris();
     for (const k in this.benders) this.benders[k].draw();
     this.bendAbilities.draw();
+    this.attackControl.draw();
     this.drawOrbitSpells();
     this.drawMines();
     this.enemies.draw(dt);

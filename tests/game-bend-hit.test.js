@@ -243,6 +243,39 @@ test('right-click dispatches Punch for Water, Earth, and Air', () => {
   }
 });
 
+test('Punch uses held material before a simultaneous LMB release', () => {
+  const s = scene(), order = [];
+  let held = 12;
+  s.leftClickMode = 'bend'; s.bendElement = 'Fire';
+  s.bendAction = { Fire: 'Punch' };
+  s.benders = { Fire: { grabRadius: 6, active: true,
+    punch() { assert.equal(held, 12); order.push('punch'); held = 0; },
+    release() { order.push('release'); held = 0; } } };
+  s.attackControl = { prepareRelease() { assert.fail('Punch must own the charged attack'); } };
+  s.stopChannel = () => {};
+  s.castWheelSpell = () => assert.fail('Punch owns RMB');
+  s.prevLeftDown = true; s.prevRightDown = false;
+  s.brushGfx = { clear() { return this; }, lineStyle() { return this; }, strokeCircle() { return this; } };
+  s.input = { activePointer: { worldX: 100, worldY: 100,
+    leftButtonDown: () => false, rightButtonDown: () => true } };
+  s.handlePointer();
+  assert.deepEqual(order, ['punch', 'release']);
+});
+
+test('LMB release snapshots charge before releasing held material', () => {
+  const s = scene(), order = [];
+  s.leftClickMode = 'bend'; s.bendElement = 'Water';
+  s.bendAction = { Water: 'Normal' };
+  s.benders = { Water: { grabRadius: 6, active: true, release() { order.push('release'); } } };
+  s.attackControl = { prepareRelease(element) { assert.equal(element, 'Water'); order.push('charge'); } };
+  s.prevLeftDown = true; s.prevRightDown = false;
+  s.brushGfx = { clear() { return this; }, lineStyle() { return this; }, strokeCircle() { return this; } };
+  s.input = { activePointer: { worldX: 100, worldY: 100,
+    leftButtonDown: () => false, rightButtonDown: () => false } };
+  s.handlePointer();
+  assert.deepEqual(order, ['charge', 'release']);
+});
+
 test('Q wheel renders only the four elements and implemented shape/action choices', () => {
   const s = scene();
   const icons = [];
@@ -281,7 +314,7 @@ test('Q offers distinct actions for each element and remembers their selection',
 
 test('Q outer ring adapts its choices to the highlighted element', () => {
   const s = scene();
-  const choices = { Fire: ['Flamethrower'], Water: ['Whip', 'Shield'], Earth: ['Wall', 'Spikes'], Air: ['Dash', 'Vortex'] };
+  const choices = { Fire: ['Flamethrower'], Water: ['Whip', 'Shield'], Earth: ['Wall', 'Spikes', 'Catch'], Air: ['Dash', 'Vortex', 'Deflect'] };
   const gfx = {};
   for (const method of ['clear', 'fillStyle', 'beginPath', 'arc', 'closePath', 'fillPath', 'lineStyle', 'strokePath', 'fillCircle']) {
     gfx[method] = () => gfx;
@@ -300,7 +333,7 @@ test('Q outer ring adapts its choices to the highlighted element', () => {
 
 test('RMB dispatches each distinct ability once and suppresses secondary spells', () => {
   for (const [element, actions] of Object.entries({ Fire: ['Flamethrower'], Water: ['Whip', 'Shield'],
-    Earth: ['Wall', 'Spikes'], Air: ['Dash', 'Vortex'] })) {
+    Earth: ['Wall', 'Spikes', 'Catch'], Air: ['Dash', 'Vortex', 'Deflect'] })) {
     for (const action of actions) {
       const s = scene(), invoked = [];
       s.leftClickMode = 'bend'; s.bendElement = element; s.bendAction = { [element]: action };
@@ -337,6 +370,45 @@ test('Air Dash cannot tunnel through a thin wall at high combined movement speed
   s.movePlayer(0.05);
   assert.ok(s.player.x + s.player.w <= 72);
   assert.equal(s.player.impulseX, 0);
+});
+
+test('a defensive debris interception happens before body damage or settling', () => {
+  for (const response of ['caught', 'deflected']) {
+    const s = scene();
+    const obj = { x: 180, y: 66, vx: -1000, vy: 0, mat: PixelWorld.MAT.STONE,
+      settleTimer: 6, bounces: 2, impactContacts: new Set(), impactArmed: true };
+    s.debris = [obj];
+    s.clipFallingSweep = (_x0, _y0, x, y) => ({ x, y, blocked: false, outOfBounds: false });
+    s.bendAbilities = { interceptDebris(chunk, fromX) {
+      assert.equal(chunk, obj); assert.equal(fromX, 180); return response;
+    } };
+    s.handleDebrisImpact = () => assert.fail('intercepted debris cannot deal body damage');
+    s.settleDebris = () => assert.fail('intercepted debris cannot settle this frame');
+    s.updateDebris(0.15);
+    assert.equal(s.debris.length, response === 'caught' ? 0 : 1);
+  }
+});
+
+test('a defensive terrain interception happens before falling-world body damage', () => {
+  const s = scene();
+  let calls = 0;
+  s.bendAbilities = { interceptRigid() { calls++; return true; } };
+  s.fallingBodies = () => assert.fail('caught terrain cannot reach the body damage pass');
+  s.handleRigidFallImpact({ mat: PixelWorld.MAT.STONE, speed: 300, fromX: 60, fromY: 45, toX: 60, toY: 48 });
+  assert.equal(calls, 1);
+});
+
+test('defensive actions retain their selection when switching Q elements', () => {
+  const s = scene();
+  s.bendStyle = { Earth: 'Bolt', Air: 'Bolt' };
+  s.bendAction = { Earth: 'Catch', Air: 'Deflect' };
+  s.bendElement = 'Earth';
+  s.benders = { Earth: { release() {} }, Air: { release() {} } };
+  s.wheelGfx = { clear() {} }; s.wheelPreviewText = { setVisible() {} };
+  s.selectBendWheelElement(3); s.closeBendWheel();
+  assert.equal(s.bendAction.Air, 'Deflect');
+  s.selectBendWheelElement(2); s.closeBendWheel();
+  assert.equal(s.bendAction.Earth, 'Catch');
 });
 
 test('right-click does not create material in dig or Normal bending mode', () => {
