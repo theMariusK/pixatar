@@ -133,10 +133,65 @@ class FXSystem {
     this.visionDim = 0;
     this.visionElement = 'Dark';
     this.time = 0;
+    this.impactContacts = [];
+    this.nextImpactScreen = 0;
   }
 
   palette(element) {
     return FX_PALETTE[element] || FX_DEFAULT_PALETTE;
+  }
+
+  // Feedback for confirmed bending contacts. Uses real time: hitstop must not
+  // make a sustained stream emit a new full impact on every simulation step.
+  impact(x, y, element, opts = {}) {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
+    const now = this.scene.time.now, kind = opts.kind || 'terrain';
+    const strength = Math.max(0.2, Math.min(2, opts.strength ?? 0.5));
+    const view = this.scene.cameras.main.worldView;
+    if (view && (x < view.x - 48 || y < view.y - 48
+      || x > view.x + view.width + 48 || y > view.y + view.height + 48)) return false;
+    const interval = kind === 'terrain' ? 170 : 110;
+    this.impactContacts = this.impactContacts.filter((hit) => now - hit.time < 180);
+    const decisive = kind === 'body' || kind === 'blast' || kind === 'block';
+    // Keep room for body hits and guards when a broad attack touches many cells.
+    if (this.impactContacts.length >= (decisive ? 24 : 16) || this.impactContacts.some((hit) =>
+      hit.element === element && hit.kind === kind && now - hit.time < interval
+      && Math.hypot(hit.x - x, hit.y - y) < 28)) return false;
+    this.impactContacts.push({ x, y, element, kind, time: now });
+    const vx = opts.vx || 0, vy = opts.vy || 0;
+    const angle = Math.hypot(vx, vy) > 1 ? Math.atan2(vy, vx) : -Math.PI / 2;
+    const size = 5 + strength * 8;
+    this._push({ kind: 'contact', x, y, element, angle, size, contact: kind,
+      parry: !!opts.parry, life: kind === 'block' ? 0.24 : 0.16 });
+
+    const count = Math.ceil(3 + strength * 6);
+    const spray = { angle: kind === 'terrain' ? angle + Math.PI : angle,
+      spread: kind === 'blast' || kind === 'steam' ? Math.PI * 2 : 1.7,
+      speed: 55 + strength * 85, life: 0.22 + strength * 0.09, size: 0.7 };
+    if (kind === 'steam') {
+      this.smoke(x, y, count, 'Water', { size: 1.3, life: 0.5, rise: 55, speed: 30 });
+    } else if (element === 'Earth') {
+      this.shards(x, y, count, element, { ...spray, size: 0.9, rise: 25 });
+      this.smoke(x, y, Math.ceil(strength * 3), element, { size: 1, life: 0.45, speed: 25 });
+    } else if (element === 'Air' || kind === 'block') {
+      this.streaks(x, y, count, element, { ...spray, life: 0.22, size: 1 });
+    } else {
+      this.burst(x, y, count, element, { ...spray, shape: element === 'Fire' ? 'square' : 'circle' });
+    }
+    if (kind === 'blast' && element === 'Fire') {
+      this.afterglow(x, y, element, { r: size * 1.4, life: 0.65 });
+    }
+    if (typeof GameAudio !== 'undefined') GameAudio.impact(element, x, y,
+      { strength, minor: strength < 1.1, contact: kind, parry: !!opts.parry });
+
+    // Only decisive hits interrupt movement; ordinary wet/burn/wind contacts
+    // still show their cue without repeatedly shaking or slowing the world.
+    if (!opts.minor && kind !== 'steam' && strength >= 1.1 && now >= this.nextImpactScreen) {
+      this.nextImpactScreen = now + 240;
+      this.shake(element, Math.min(0.005, strength * 0.0025), 65);
+      this.hitstop(Math.min(44, 14 + strength * 13));
+    }
+    return true;
   }
 
   // ---------- frame: hitstop ----------
@@ -172,7 +227,7 @@ class FXSystem {
     const rise = opts.rise ?? 0;
     const spin = opts.spin ?? 0;
 
-    for (let i = 0; i < count; i++) {
+    for (let i = 0; i < count && this.particles.length < FX_MAX_PARTICLES; i++) {
       const a = baseAngle + (Math.random() - 0.5) * spread;
       const spd = speed * (0.35 + Math.random() * 0.9);
       this.particles.push({
@@ -658,6 +713,7 @@ class FXSystem {
         case 'rune': this._drawRune(g, e, t, pal); break;
         case 'vortex': this._drawVortex(g, e, t, pal); break;
         case 'orb': this._drawOrb(g, e, t, pal); break;
+        case 'contact': this._drawContact(g, e, t, pal); break;
         // Residue draws on the lower layer so live effects sit on top of it.
         case 'afterglow': this._drawAfterglow(gl, e, t, pal); break;
       }
@@ -703,6 +759,36 @@ class FXSystem {
       g.lineStyle(short * 0.042, pal.deep, strength * f * 0.34);
       g.strokeRect(inset, inset, w - inset * 2, h - inset * 2);
     }
+  }
+
+  _drawContact(g, e, t, pal) {
+    const c = Math.cos(e.angle), sn = Math.sin(e.angle), grow = 1 + (1 - t) * 0.65;
+    const point = (a, b) => [e.x + (a * c - b * sn) * grow, e.y + (a * sn + b * c) * grow];
+    const stroke = (width, color, alpha) => {
+      g.lineStyle(width, color, alpha);
+      if (e.contact === 'block') {
+        g.beginPath();
+        g.arc(e.x, e.y, e.size * grow, e.angle + Math.PI * 0.6, e.angle + Math.PI * 1.4);
+        g.strokePath();
+        if (e.parry) {
+          g.beginPath();
+          g.arc(e.x, e.y, (e.size + 5) * grow, e.angle + Math.PI * 0.6, e.angle + Math.PI * 1.4);
+          g.strokePath();
+        }
+      } else {
+        const rays = e.contact === 'body' ? 4 : 6;
+        for (let i = 0; i < rays; i++) {
+          const a = i * Math.PI * 2 / rays + Math.PI / 4;
+          const [x0, y0] = point(Math.cos(a) * 2, Math.sin(a) * 2);
+          const [x1, y1] = point(Math.cos(a) * e.size, Math.sin(a) * e.size * 0.65);
+          g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.strokePath();
+        }
+      }
+    };
+    // A dark border keeps the brief pale hit mark visible over both bright fire
+    // and daylight terrain. This is local to the contact, never a screen flash.
+    stroke(4, pal.deep, t * 0.8);
+    stroke(1.5, e.parry || e.contact === 'body' ? 0xffffff : pal.core, t);
   }
 
   _drawBeam(g, e, t, pal) {

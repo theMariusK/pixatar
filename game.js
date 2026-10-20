@@ -1003,9 +1003,16 @@ class SandScene extends Phaser.Scene {
     // Being hit from off-screen with no feedback would be unreadable, so mark it.
     if (amount > 0) {
       this.hitFlashUntil = this.time.now + 260;
-      this.fx.burst(this.player.x + this.player.w / 2, this.player.y + this.player.h / 2,
-        18, msg.element || 'Arcane', { speed: 120, life: 0.5 });
-      this.fx.shake(msg.element, 0.008, 160);
+      if (!msg.bend) {
+        this.fx.burst(this.player.x + this.player.w / 2, this.player.y + this.player.h / 2,
+          18, msg.element || 'Arcane', { speed: 120, life: 0.5 });
+        this.fx.shake(msg.element, 0.008, 160);
+      }
+    }
+    if (msg.bend && (amount > 0 || msg.bend.wetMs || Math.hypot(msg.bend.ix || 0, msg.bend.iy || 0) >= 1)) {
+      this.fx.impact?.(this.player.x + this.player.w / 2, this.player.y + this.player.h / 2,
+        msg.element, { kind: 'body', strength: Math.max(0.35, amount / 18),
+          vx: msg.bend.ix, vy: msg.bend.iy, minor: amount < 10 });
     }
   }
 

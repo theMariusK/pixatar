@@ -49,7 +49,7 @@ function scene(element, action) {
     emitFireCasterParticles(count) { this.casterFx.push(count); },
     bodiesInRadius: () => [], knockback() {},
   };
-  s.fx = Object.fromEntries(['burst', 'ring', 'streaks', 'shockwave', 'shards', 'smoke', 'hitstop', 'shake']
+  s.fx = Object.fromEntries(['burst', 'ring', 'streaks', 'shockwave', 'shards', 'smoke', 'hitstop', 'shake', 'impact']
     .map((name) => [name, (...args) => s.visuals.push([name, ...args])]));
   s.benders = { Water: new WaterBending(s), Earth: new EarthBending(s),
     Fire: new FireBending(s), Air: new AirBending(s) };
@@ -167,6 +167,23 @@ test('Earth Catch enforces capacity and impact energy limits', () => {
   assert.equal(heavy.abilities.interceptRock(incomingRock(140, 2000), 180, 166, 80, 166), null);
   assert.equal(heavy.benders.Earth.holding, 0);
   assert.match(heavy.abilities.hint, /heavy or fast/);
+  assert.ok(!heavy.visuals.some(([name]) => name === 'impact'));
+});
+
+test('successful Catch and Deflect give guard feedback with the incoming direction', () => {
+  for (const [element, action] of [['Earth', 'Catch'], ['Air', 'Deflect']]) {
+    const s = scene(element, action);
+    if (action === 'Deflect') gather(s, 'Air', 30);
+    s.abilities.cast(action);
+    const rock = incomingRock();
+    assert.ok(s.abilities.interceptRock(rock, 180, 166, 80, 166));
+    const cue = s.visuals.find(([name]) => name === 'impact');
+    assert.equal(cue[3], element);
+    assert.equal(cue[4].kind, 'block');
+    assert.equal(cue[4].parry, true);
+    assert.ok(cue[4].vx < 0);
+    assert.equal(s.damage.length, 0);
+  }
 });
 
 test('a well-timed Earth Catch can stop a heavier rock than an old guard', () => {

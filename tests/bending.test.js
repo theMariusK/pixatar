@@ -41,6 +41,7 @@ function scene() {
     input: { activePointer: { worldX: 100, worldY: 100 } },
     add: { graphics: () => ({ setDepth() { return this; } }) },
     fx: {
+      impact(...args) { visualFx.push(['impact', ...args]); },
       burst(...args) { visualFx.push(['burst', ...args]); },
       ring(...args) { visualFx.push(['ring', ...args]); },
       shockwave(...args) { visualFx.push(['shockwave', ...args]); },
@@ -687,6 +688,37 @@ test('Earth crater damage increases with rock mass and speed', () => {
   assert.equal(fast.rock.cells.length, 16);
 });
 
+test('Earth contact feedback scales with mass and speed, including unbroken bedrock', () => {
+  const small = fracturePatch(MAT.DIRT, 4, 200);
+  const large = fracturePatch(MAT.DIRT, 64, 400);
+  const bedrock = fracturePatch(MAT.BEDROCK, 64, 400);
+  const hit = (result) => result.s.visualFx.find(([name]) => name === 'impact');
+  assert.ok(hit(large)[4].strength > hit(small)[4].strength);
+  assert.equal(bedrock.broken, 0);
+  assert.equal(hit(bedrock)[3], 'Earth');
+  assert.equal(hit(bedrock)[1], 80 * PIXEL + PIXEL / 2);
+  assert.ok(hit(bedrock)[4].vx > 0);
+});
+
+test('confirmed elemental body contacts produce feedback, while misses and recalled particles do not', () => {
+  for (const [element, Bender] of [['Water', WaterBending], ['Fire', FireBending]]) {
+    const s = scene(), bender = new Bender(s);
+    bender.held.push({ x: 25, y: 25, vx: 500, vy: 0 });
+    bender.free.push({ x: 105, y: 110, vx: 500, vy: 0, bendRecalling: true });
+    bender.touchBodies();
+    assert.equal(s.visualFx.filter(([name]) => name === 'impact').length, 0);
+    bender.free[0].bendRecalling = false;
+    bender.touchBodies();
+    const hits = s.visualFx.filter(([name]) => name === 'impact');
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0][3], element);
+    assert.equal(hits[0][4].kind, 'body');
+    assert.ok(hits[0][4].vx > 0);
+    bender.touchBodies();
+    assert.equal(s.visualFx.filter(([name]) => name === 'impact').length, 1);
+  }
+});
+
 test('Earth impacts crumble ground and masonry according to their resistance', () => {
   const dirt = fracturePatch(MAT.DIRT, 64, 400);
   const brick = fracturePatch(MAT.BRICK, 64, 400);
@@ -1004,6 +1036,8 @@ test('doused fireballs create steam effects without blast damage or impulse', ()
   assert.equal(s.cellWrites.length, 0);
   assert.equal(s.hits.length, 0);
   assert.ok(s.visualFx.some((e) => e[0] === 'burst' && e[4] === 'Water'));
+  assert.ok(s.visualFx.some((e) => e[0] === 'impact' && e[4].kind === 'steam'));
+  assert.ok(!s.visualFx.some((e) => e[0] === 'impact' && e[4].kind === 'blast'));
 });
 
 test('Bolt Punch keeps its embers visible and sheds fire along its flight', () => {

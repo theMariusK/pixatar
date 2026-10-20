@@ -143,6 +143,7 @@ function bendNear(x0, y0, x1, y1, radius) {
 }
 
 function bendSteam(scene, x, y, amount = 1) {
+  scene.fx.impact?.(x, y, 'Water', { kind: 'steam', strength: 0.3 + Math.min(0.6, amount / 15), minor: true });
   const gx = Math.floor(x / PIXEL), gy = Math.floor(y / PIXEL);
   if (gx > 0 && gx < COLS - 1 && gy > 0 && gy < ROWS - 1) {
     const id = scene.idx(gx, gy), mat = scene.grid[id];
@@ -158,6 +159,8 @@ function bendCoolBall(scene, ball, x, y, drop = null) {
   const before = Math.max(0, ball.mass);
   const shield = drop?.bendAbility?.kind === 'Shield' ? drop.bendAbility : null;
   const cooling = shield && shield.age <= 0.22 ? 10 : 6;
+  if (shield) scene.fx.impact?.(x, y, 'Water', { kind: 'block', strength: 0.8,
+    vx: ball.vx, vy: ball.vy, parry: shield.age <= 0.22 });
   ball.mass = Math.max(0, before - cooling / (ball.attackPower || 1));
   if (shield) { ball.vx *= 0.85; ball.vy *= 0.85; }
   const ratio = before > 0 ? Math.sqrt(ball.mass / before) : 0;
@@ -223,6 +226,8 @@ function bendDeflect(scene, drop, contact) {
   if (d < 0.01) { dx = -rvx; dy = -rvy || -1; d = Math.hypot(dx, dy); }
   const nx = dx / d, ny = dy / d;
   const inward = rvx * nx + rvy * ny;
+  if (inward < -65) scene.fx.impact?.(contact.x, contact.y, 'Earth',
+    { kind: 'block', strength: Math.min(0.9, Math.abs(inward) / 700), vx: rvx, vy: rvy, minor: true });
   if (inward < 0) {
     drop.vx = (drop.vx || 0) - inward * nx * 1.5;
     drop.vy = (drop.vy || 0) - inward * ny * 1.5;
@@ -442,6 +447,7 @@ class BendingSurfaceDamage {
 
   object(obj, amount, element, impact = false) {
     if (amount <= 0 || !Number.isFinite(PixelWorld.IMPACT_RESISTANCE[obj.mat])) return false;
+    this.scene.fx.impact?.(obj.x, obj.y, element, { strength: Math.min(0.75, 0.2 + Math.sqrt(amount) * 0.3), minor: true });
     let record = this.objects.get(obj);
     if (!record || record.mat !== obj.mat) {
       record = this.record(obj.mat, obj.variant);
@@ -669,6 +675,7 @@ class WaterBending {
         target.enemy.impulseX = (target.enemy.impulseX || 0) + ix;
         target.enemy.vy += iy;
       } else s.reportHit(target.id, 'Water', 0, null, { wetMs: 650, ix, iy });
+      s.fx.impact?.(bx, by, 'Water', { kind: 'body', strength: 0.8, vx: ix, vy: iy, minor: true });
     }
     for (const obj of [...s.debris]) {
       if (Math.hypot(obj.x - x, obj.y - y) > radius
@@ -703,11 +710,15 @@ class WaterBending {
   touchBodies() {
     const s = this.scene;
     const now = s.time.now;
-    for (const target of bendContacts(s, [...this.held, ...this.free.filter((d) => !d.bendRecalling)])) {
+    const drops = [...this.held, ...this.free.filter((d) => !d.bendRecalling)];
+    for (const target of bendContacts(s, drops)) {
       const key = target.id || target.enemy;
       if (!bendHitReady(this.hitCooldowns, key, now, 170)) continue;
       if (target.enemy) target.enemy.wetUntil = now + 450;
       else s.reportHit(target.id, 'Water', 0, null, { wetMs: 450 });
+      const drop = drops.find((d) => bendBodyWithin(target.body, d.x, d.y, PIXEL));
+      s.fx.impact?.(target.body.x + target.body.w / 2, target.body.y + target.body.h / 2,
+        'Water', { kind: 'body', strength: 0.35, vx: drop?.vx, vy: drop?.vy, minor: true });
       s.fx.burst(target.body.x + target.body.w / 2, target.body.y + target.body.h / 2,
         3, 'Water', { speed: 35, life: 0.25, size: 1 });
     }
@@ -727,6 +738,8 @@ class WaterBending {
         target.enemy.impulseX = (target.enemy.impulseX || 0) + ix;
         target.enemy.vy += iy;
       } else s.reportHit(target.id, 'Water', 0, null, { wetMs: 650, ix, iy });
+      s.fx.impact?.(drop.x, drop.y, 'Water', { kind: 'body',
+        strength: Math.min(1.4, 0.35 + Math.hypot(drop.vx, drop.vy) / 800), vx: drop.vx, vy: drop.vy });
       s.fx.burst(drop.x, drop.y, 5, 'Water', { speed: 55, life: 0.28, size: 1.1 });
     }
   }
@@ -880,6 +893,8 @@ class WaterBending {
 
   erodeSurface(drop, x, y) {
     const speed = Math.hypot(drop.vx, drop.vy);
+    if (speed >= 65) this.scene.fx.impact?.(x, y, 'Water',
+      { strength: Math.min(0.9, speed / 750), vx: drop.vx, vy: drop.vy, minor: true });
     const load = 1 + Math.min(1.5, Math.sqrt(drop.punchMass || 1) / 10);
     if (this.surfaceDamage.cell(Math.floor(x / PIXEL), Math.floor(y / PIXEL),
       speed < 65 ? 0.0001 : BEND_DAMAGE.WATER_POWER * (speed / 200) ** 2 * load, 'Water')) {
@@ -1144,6 +1159,7 @@ class EarthBending {
         s.reportHit(target.id, 'Earth', damage, null, { ix, iy });
       }
       s.fx.burst(cx, cy, 8, 'Earth', { speed: 90, life: 0.35, size: 1.4 });
+      s.fx.impact?.(cx, cy, 'Earth', { kind: 'body', strength: damage / 18, vx: rock.vx, vy: rock.vy });
     }
   }
 
@@ -1160,6 +1176,8 @@ class EarthBending {
       if (!bendHitReady(this.hitCooldowns, d, s.time.now, 180)) continue;
       const resistance = PixelWorld.IMPACT_RESISTANCE[d.mat];
       if (!Number.isFinite(resistance)) continue;
+      s.fx.impact?.(d.x, d.y, 'Earth', { strength: 0.3 + Math.sqrt(energy) / 22,
+        vx: rock.vx, vy: rock.vy, minor: !!rock.fragment });
       if (energy - spent >= resistance) {
         s.debris.splice(i, 1);
         spent += resistance;
@@ -1239,6 +1257,8 @@ class EarthBending {
       enqueue(cell.x, cell.y - 1);
       enqueue(cell.x, cell.y + 1);
     }
+    s.fx.impact?.(cx * PIXEL + PIXEL / 2, cy * PIXEL + PIXEL / 2, 'Earth',
+      { strength: 0.3 + Math.sqrt(energy) / 22, vx: rock.vx, vy: rock.vy, minor: !!rock.fragment });
     if (!broken) return 0;
     this.spendImpactEnergy(rock, spent, energy);
     // Queue one support pass rather than scanning the whole world per fragment.
@@ -1248,10 +1268,6 @@ class EarthBending {
       { speed: Math.min(240, 80 + Math.sqrt(energy) * 6), size: 1.2, life: 0.45 });
     s.fx.smoke(x, y, Math.min(12, 2 + broken / 12), 'Earth',
       { speed: 35, rise: 45, size: 1.4, life: 0.7 });
-    if (!rock.fragment) {
-      s.fx.shake('Earth', Math.min(0.012, 0.001 + Math.sqrt(spent) * 0.0004), 130);
-      if (broken >= 12) s.fx.hitstop(Math.min(55, 25 + broken / 8));
-    }
     return broken;
   }
 
@@ -1492,7 +1508,8 @@ class EarthBending {
       return;
     }
     s.fx.burst(rock.x, rock.y + 4, Math.min(24, 4 + n / 6), 'Earth', { speed: 70, life: 0.6, rise: 30 });
-    s.fx.shake('Earth', Math.min(0.01, 0.002 + n * 0.00005), 140);
+    s.fx.impact?.(rock.x, rock.y + 4, 'Earth', { strength: 0.3 + Math.sqrt(this.impactEnergy(rock)) / 22,
+      vx: rock.vx, vy: rock.vy, minor: true });
   }
 
   // One stone cell at (gx, gy), or as near to it as there is room. Water it lands
@@ -1756,6 +1773,8 @@ class FireBending {
       } else {
         s.reportHit(target.id, 'Fire', amount, null, { burnMs: 1200 });
       }
+      s.fx.impact?.(bx, by, 'Fire', { kind: 'body', strength: amount / 22,
+        vx: bx - x, vy: by - y });
     }
   }
 
@@ -1862,6 +1881,9 @@ class FireBending {
 
   impactFireball(ball, doused = false) {
     const s = this.scene;
+    s.fx.impact?.(ball.x, ball.y, doused ? 'Water' : 'Fire',
+      { kind: doused ? 'steam' : 'blast', strength: (0.6 + Math.sqrt(ball.mass) / 10) * (ball.attackPower || 1),
+        vx: ball.vx, vy: ball.vy, minor: doused });
     const radius = Math.min(16, Math.round((3 + Math.sqrt(ball.mass) * 0.8) * (1 + ((ball.attackPower || 1) - 1) * 0.2)));
     if (!doused) {
       const heat = Math.min(1.4, (0.15 + Math.sqrt(ball.mass) * 0.06) * (ball.attackPower || 1));
@@ -1878,13 +1900,11 @@ class FireBending {
       s.fx.smoke(ball.x, ball.y, 7, 'Fire', { speed: 70, life: 0.9, size: 2.4, rise: 45 });
       s.fx.shockwave(ball.x, ball.y, 'Fire',
         { r0: ball.size, r1: radius * PIXEL * 1.9, life: 0.4, width: 3, rings: 2 });
-      s.fx.hitstop(35);
     } else {
       bendSteam(s, ball.x, ball.y, Math.min(12, 2 + Math.sqrt(ball.mass)));
     }
     s.fx.ring(ball.x, ball.y, doused ? 'Water' : 'Fire',
       { r0: 2, r1: radius * PIXEL * 1.6, life: 0.35, width: 3 });
-    if (!doused) s.fx.shake('Fire', 0.004 + Math.min(ball.mass, 100) * 0.00004, 110);
   }
 
   fireballEmberPoint(ball, ember) {
@@ -2017,6 +2037,9 @@ class FireBending {
       } else {
         s.reportHit(target.id, 'Fire', 3 * power, null, { burnMs: 1200 });
       }
+      const ember = embers.find((d) => bendBodyWithin(target.body, d.x, d.y, PIXEL));
+      s.fx.impact?.(target.body.x + target.body.w / 2, target.body.y + target.body.h / 2,
+        'Fire', { kind: 'body', strength: 0.45 * power, vx: ember?.vx, vy: ember?.vy, minor: true });
       s.fx.burst(target.body.x + target.body.w / 2, target.body.y + 3,
         5, 'Fire', { speed: 45, life: 0.4, rise: 55, size: 1.3 });
     }
@@ -2146,14 +2169,17 @@ class FireBending {
     for (let k = 0; k < steps; k++) {
       if (bendReactFire(s, d)) return 'consumed';
       if (bendEarthContact(s, d.x + sx, d.y + sy, PIXEL / 2)) {
+        s.fx.impact?.(d.x, d.y, 'Earth', { kind: 'block', strength: 0.5, vx: d.vx, vy: d.vy, minor: true });
         s.fx.burst(d.x, d.y, 3, 'Fire', { speed: 45, life: 0.2, size: 0.8 });
         return 'consumed';
       }
       if (this.solidAt(d.x + sx, d.y)) {
+        s.fx.impact?.(d.x + sx, d.y, 'Fire', { strength: 0.35, vx: d.vx, vy: d.vy, minor: true });
         if (this.igniteCell(Math.floor((d.x + sx) / PIXEL), Math.floor(d.y / PIXEL), dt * 1.6)) return 'consumed';
         blocked = true;
       } else d.x += sx;
       if (this.solidAt(d.x, d.y + sy)) {
+        s.fx.impact?.(d.x, d.y + sy, 'Fire', { strength: 0.35, vx: d.vx, vy: d.vy, minor: true });
         if (this.igniteCell(Math.floor(d.x / PIXEL), Math.floor((d.y + sy) / PIXEL), dt * 1.6)) return 'consumed';
         blocked = true;
       } else d.y += sy;
@@ -2188,6 +2214,8 @@ class FireBending {
         s.damageEnemy(target.enemy, 4, 'Fire');
         target.enemy.burnUntil = s.time.now + 1200;
       } else s.reportHit(target.id, 'Fire', 4, null, { burnMs: 1200 });
+      s.fx.impact?.(ember.x, ember.y, 'Fire', { kind: 'body', strength: 0.55,
+        vx: ember.vx, vy: ember.vy, minor: true });
       s.fx.burst(ember.x, ember.y, 5, 'Fire', { speed: 45, life: 0.25, size: 1.1 });
     }
     return contacts.length > 0;
@@ -2575,6 +2603,8 @@ class AirBending {
   erodeSurface(wisp, x, y) {
     const speed = Math.hypot(wisp.vx, wisp.vy);
     if (speed < 65) return;
+    this.scene.fx.impact?.(x, y, 'Air', { strength: Math.min(0.8, speed / 800),
+      vx: wisp.vx, vy: wisp.vy, minor: true });
     if (this.surfaceDamage.cell(Math.floor(x / PIXEL), Math.floor(y / PIXEL),
       0.015 * (speed / 200) ** 2, 'Air')) {
       wisp.vx *= 0.6;
@@ -2609,6 +2639,13 @@ class AirBending {
   // Pushes bodies and loose objects away from the gust, including the caster.
   gust(cx, cy, radiusPx, strength, direction = null, innerRadius = 0, swirl = 0) {
     const s = this.scene;
+    const feedback = (body, force) => {
+      const magnitude = Math.hypot(force.ix, force.iy);
+      if (magnitude < 1) return;
+      s.fx.impact?.(body.x + body.w / 2, body.y + body.h / 2, 'Air',
+        { kind: 'body', strength: 0.25 + Math.sqrt(magnitude) / 22,
+          vx: force.ix, vy: force.iy, minor: magnitude < 180 });
+    };
     const falloff = (distance) => {
       if (distance >= radiusPx || distance < innerRadius) return 0;
       if (!innerRadius) return 1 - distance / radiusPx;
@@ -2645,6 +2682,7 @@ class AirBending {
       if (!force) continue;
       e.impulseX = (e.impulseX || 0) + force.ix;
       e.vy += force.iy;
+      feedback(e, force);
     }
     if (!s.player.dead) {
       const force = bodyForce(s.player);
@@ -2686,6 +2724,7 @@ class AirBending {
       const force = bodyForce(target.body);
       if (!target.id || !force || !bendHitReady(this.hitCooldowns, target.id, now, 80)) continue;
       s.reportHit(target.id, 'Air', 0, null, force);
+      feedback(target.body, force);
     }
     this.blowGas(cx, cy, radiusPx, direction, strength, innerRadius, swirl);
   }

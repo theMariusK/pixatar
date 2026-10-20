@@ -61,3 +61,16 @@ when you lower the guard. The HUD shows remaining guard resources and timing bon
 
 Defenses handle locally simulated attacks and falling terrain. Remote spell visuals
 use the game's existing multiplayer collision authority.
+
+## Impact feedback
+
+Hits on bodies show a brief directional mark. Terrain and object contacts produce
+water splashes, heavy earth chips and dust, fire embers, or wind streaks, with
+element-specific sounds. Larger and charged attacks produce stronger cues; decisive
+hits add a short camera jolt and pause. Fireballs leave a brief glow at impact,
+while extinguished fire produces steam.
+
+Successful guards show a curved block mark; timed blocks add a second bright arc
+and a sharper sound. Repeated contacts are throttled, and camera cues share a
+cooldown so sustained attacks stay readable. Offscreen contacts do not shake the
+camera.

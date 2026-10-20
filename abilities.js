@@ -189,6 +189,8 @@ class BendingAbilities {
       } else s.reportHit(target.id, 'Water', amount, null,
         { wetMs: 900, ix: dir.x * 170 * whip.power, iy: (dir.y * 120 - 70) * whip.power });
       s.fx.burst(x, y, 10, 'Water', { speed: 90, life: 0.35, size: 1.2 });
+      s.fx.impact?.(x, y, 'Water', { kind: 'body', strength: 0.7 * whip.power,
+        vx: dir.x * 170, vy: dir.y * 170 });
     }
   }
 
@@ -305,11 +307,15 @@ class BendingAbilities {
     this.feedback('Rock caught · release RMB, then press again to throw');
     s.fx.shards(contact.x, contact.y, Math.min(20, 5 + mass / 3), 'Earth', { speed: 65, life: 0.3 });
     s.fx.ring(contact.x, contact.y, 'Earth', { r0: 2, r1: 18, life: 0.2 });
+    s.fx.impact?.(contact.x, contact.y, 'Earth', { kind: 'block',
+      strength: Math.min(1.5, 0.5 + Math.sqrt(mass) * speed / 4000),
+      vx: obj.vx, vy: obj.vy, parry: this.catch.age <= 0.22 });
     return true;
   }
 
   reflect(obj, contact, mass = 1) {
     const s = this.scene, state = this.deflect;
+    const incoming = { vx: obj.vx, vy: obj.vy };
     const speed = Math.hypot(obj.vx, obj.vy), parry = state.age <= 0.22;
     const cost = Math.max(1, Math.ceil((1 + Math.sqrt(mass) * speed / 330) * (parry ? 0.5 : 1)));
     if (state.wisps.length < cost) return this.feedback('Guard strained · gather more air');
@@ -327,6 +333,8 @@ class BendingAbilities {
     s.fx.streaks(obj.x, obj.y, parry ? 12 : 7, 'Air',
       { speed: 170, angle: Math.atan2(obj.vy, obj.vx), spread: 0.5, life: 0.25 });
     s.fx.ring(obj.x, obj.y, 'Air', { r0: 2, r1: parry ? 24 : 16, life: 0.2 });
+    s.fx.impact?.(obj.x, obj.y, 'Air', { kind: 'block', strength: parry ? 1.2 : 0.8,
+      ...incoming, parry });
     if (!state.wisps.length) this.stopChannel();
     return true;
   }
@@ -440,6 +448,8 @@ class BendingAbilities {
     }
     if (!nearest) return false;
     const { drop, x, y } = nearest;
+    s.fx.impact?.(x, y, 'Water', { kind: 'block', strength: this.shield.age <= 0.22 ? 1.15 : 0.7,
+      vx: pr.vx, vy: pr.vy, parry: this.shield.age <= 0.22 });
     const cooling = this.shield.age <= 0.22 ? 2 : 1;
     const needed = Math.max(1, Math.ceil((pr.radius || 1) / (pr.element === 'Fire' ? 3 : 4)));
     const nearby = this.liveWater(this.shield).filter((d) => bendNear(d.x, d.y, drop.x, drop.y, 24));
@@ -570,6 +580,7 @@ class BendingAbilities {
               s.damageEnemy(target.enemy, amount, 'Earth');
               target.enemy.vy -= 210;
             } else s.reportHit(target.id, 'Earth', amount, null, { ix: 0, iy: -210 });
+            s.fx.impact?.(x, y, 'Earth', { kind: 'body', strength: amount / 18, vx: 0, vy: -210 });
           }
         }
         if (earth.open.has(s.grid[s.idx(cell.x, cell.y)]) && !this.bodyOccupies(cell.x, cell.y)) {

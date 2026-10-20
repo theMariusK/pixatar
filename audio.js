@@ -8,6 +8,7 @@ const GameAudio = (() => {
     Fire:      { cast: [170, 320, 520], impact: [95, 180, 380], wave: 'sawtooth' },
     Water:     { cast: [260, 390, 610], impact: [150, 300, 460], wave: 'sine' },
     Earth:     { cast: [78, 125, 205], impact: [55, 90, 155], wave: 'triangle' },
+    Air:       { cast: [330, 510, 780], impact: [210, 420, 680], wave: 'sine' },
     Lightning: { cast: [310, 640, 980], impact: [190, 480, 850], wave: 'square' },
     Dark:      { cast: [105, 155, 250], impact: [48, 82, 190], wave: 'sawtooth' },
     Arcane:    { cast: [220, 440, 740], impact: [125, 250, 590], wave: 'triangle' },
@@ -253,8 +254,25 @@ const GameAudio = (() => {
       return;
     }
     if (kind === 'impact') {
-      const key = `impact:${element}`;
+      const cue = extra.contact === 'block' || extra.contact === 'steam'
+        ? extra.contact : extra.minor ? 'minor' : 'major';
+      const key = `impact:${element}:${cue}`;
       if (!allowed(key, extra.minor ? 140 : 90)) return;
+      if (extra.contact === 'steam') {
+        noise(0.16, { gain: 0.025 * positionGain * strength, cutoff: 2600 });
+        return;
+      }
+      if (extra.contact === 'block') {
+        tone(palette.impact[1] * (extra.parry ? 2 : 1.4), 0.12,
+          { wave: 'triangle', endFrequency: palette.impact[1], gain: 0.06 * positionGain * strength });
+        noise(0.06, { gain: 0.015 * positionGain * strength, cutoff: 1800 });
+        return;
+      }
+      if (element === 'Air') {
+        noise(0.13, { gain: 0.04 * positionGain * strength, cutoff: 3200 });
+        tone(210, 0.08, { wave: 'sine', endFrequency: 100, gain: 0.025 * positionGain * strength });
+        return;
+      }
       tone(palette.impact[0], 0.25, { wave: palette.wave, endFrequency: palette.impact[0] * 0.48, gain: 0.095 * positionGain * strength, cutoff: 1500 });
       tone(palette.impact[1], 0.15, { delay: 0.012, wave: 'triangle', endFrequency: palette.impact[1] * 0.7, gain: 0.045 * positionGain * strength });
       if (element === 'Lightning' || element === 'Arcane' || element === 'Water') {
