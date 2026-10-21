@@ -20,6 +20,12 @@ function makeWorld() {
 }
 let W = null;
 
+// world.js is grid-based and deliberately has no PIXEL constant. The client renders
+// one cell as 3px, so network positions and blast radii use the same scale.
+const PIXEL = 3;
+const WORLD_PX_W = COLS * PIXEL;
+const WORLD_PX_H = ROWS * PIXEL;
+
 function idx(x, y) {
   return y * COLS + x;
 }
@@ -107,9 +113,10 @@ function applyCells(cells) {
     const lifeVal = c[2] | 0;
     if (id < 0 || id >= COLS * ROWS) continue;
     if (mat < 0 || mat >= MAT_COUNT) continue;
-    // Bedrock stays indestructible regardless of what a client claims.
-    if (W.grid[id] === BEDROCK && mat !== BEDROCK) continue;
-    setCell(id, mat, mat === BEDROCK ? undefined : lifeVal);
+    // Bedrock stays indestructible regardless of what a client claims, and clients
+    // never need to create it: it only exists as the world border.
+    if (mat === BEDROCK || W.grid[id] === BEDROCK) continue;
+    setCell(id, mat, lifeVal);
   }
 }
 
@@ -153,8 +160,21 @@ function shockCircle(gx, gy, r) {
 // A connected client starts in the lobby (no room); creating or joining puts it in
 // a room and only then does it receive a world.
 
-const PORT = process.env.PORT || 8080;
-const wss = new WebSocketServer({ port: PORT });
+const DEFAULT_PORT = 8080;
+// One JSON message should never need to be larger than a big cell delta. The ws
+// default (100 MiB) lets a bug or a hostile client allocate far too much.
+const MAX_MESSAGE_BYTES = 2 * 1024 * 1024;
+// Legitimate play flushes at most ~900 cells per frame, so 120k/s leaves room for
+// large spells while still bounding floods. Hits are relayed much less often.
+const MAX_CELLS_PER_SECOND = 120000;
+const MAX_HITS_PER_SECOND = 40;
+const HEARTBEAT_MS = 30000;
+
+let wss = null;
+let serverSeed;
+let logger = console.log;
+let heartbeatTimer = null;
+let tickTimers = [];
 
 const PLAYER_COLORS = [0xff6b6b, 0x6bffb8, 0xffe66b, 0xb56bff, 0x6bd4ff, 0xff9f6b, 0xff6bd4, 0x9bff6b];
 const VALID_LIQUIDS = new Set(['water', 'lava', 'acid', 'oil']);
@@ -170,6 +190,16 @@ const EMPTY_ROOM_TTL_MS = 20000;
 
 const rooms = new Map();       // code -> room
 const lobbyClients = new Set(); // sockets not currently in a room
+
+// Simple per-socket token bucket. It is intentionally generous: its job is to stop
+// floods, not to police normal casting.
+function withinRate(ws, key, amount, limit) {
+  const now = Date.now();
+  if (!ws.rate || now - ws.rate.at >= 1000) ws.rate = { at: now, cells: 0, hits: 0 };
+  if (ws.rate[key] + amount > limit) return false;
+  ws.rate[key] += amount;
+  return true;
+}
 
 function makeRoomCode() {
   for (let attempt = 0; attempt < 200; attempt++) {
@@ -194,9 +224,9 @@ function createRoom(name, hostWs) {
     players: new Map(),   // playerId -> { id, ws, x, y, facing, liquid, color, health, corpse state }
     world: makeWorld(),
   };
-  // Generate this room's terrain into its own world.
-  const seedEnv = process.env.SEED;
-  const info = PixelWorld.generateWorld(room.world, seedEnv !== undefined && seedEnv !== '' ? Number(seedEnv) >>> 0 : undefined);
+  // Generate this room's terrain into its own world. serverSeed comes from
+  // startServer()/SEED so tests can pin the world.
+  const info = PixelWorld.generateWorld(room.world, serverSeed);
   room.world.onRigidImpact = (hit) => {
     const amount = PixelWorld.impactDamage(hit.speed, hit.mat);
     if (amount <= 0) return;
@@ -212,7 +242,7 @@ function createRoom(name, hostWs) {
       });
     }
   };
-  console.log(`room ${code} world seed ${info.seed}: ${info.regions.map((r) => r.biome).join(' / ')} | ${info.structures.join(', ')}`);
+  logger(`room ${code} world seed ${info.seed}: ${info.regions.map((r) => r.biome).join(' / ')} | ${info.structures.join(', ')}`);
   rooms.set(code, room);
   return room;
 }
@@ -291,9 +321,9 @@ function joinRoom(room, ws) {
     bg: toBase64(room.world.bg),
     players: serializePlayers(room),
   });
-  broadcastToRoom(room, { t: 'players', players: serializePlayers(room) });
+  broadcastToRoom(room, { t: 'players', players: serializePlayers(room) }, id);
   pushRoomList();
-  console.log(`${id} joined room ${room.id} "${room.name}" (${room.players.size} in room)`);
+  logger(`${id} joined room ${room.id} "${room.name}" (${room.players.size} in room)`);
   return true;
 }
 
@@ -312,19 +342,26 @@ function leaveRoom(ws) {
   }
   lobbyClients.add(ws);
   pushRoomList();
-  console.log(`${ws.playerId} left room ${room.id} (${room.players.size} left)`);
+  logger(`${ws.playerId} left room ${room.id} (${room.players.size} left)`);
 }
 
-wss.on('connection', (ws) => {
+function handleConnection(ws) {
   const numId = nextId++;
   ws.playerId = String(numId);
   ws.color = PLAYER_COLORS[(numId - 1) % PLAYER_COLORS.length];
   ws.room = null;
+  ws.isAlive = true;
+  ws.rate = { at: 0, cells: 0, hits: 0 };
   lobbyClients.add(ws);
 
   // Lobby clients get the room list immediately so the browser has something to show.
   sendTo(ws, roomListPayload());
-  console.log(`player ${ws.playerId} connected (lobby: ${lobbyClients.size})`);
+  logger(`player ${ws.playerId} connected (lobby: ${lobbyClients.size})`);
+
+  // Dead TCP connections can otherwise hold a room seat indefinitely. Ping/pong
+  // lets the heartbeat interval reap them.
+  ws.on('pong', () => { ws.isAlive = true; });
+  ws.on('error', (err) => { logger(`player ${ws.playerId} socket error: ${err.message}`); });
 
   ws.on('message', (raw) => {
     let msg;
@@ -361,13 +398,16 @@ wss.on('connection', (ws) => {
     W = room.world;   // aim the simulation helpers at this room's world
 
     if (msg.t === 'input') {
-      p.x = +msg.x || 0;
-      p.y = +msg.y || 0;
+      // Positions and health arrive from the network; keep them finite and inside
+      // the world so one client cannot corrupt another's view with absurd values.
+      const x = +msg.x, y = +msg.y;
+      if (Number.isFinite(x)) p.x = Math.min(Math.max(x, 0), WORLD_PX_W);
+      if (Number.isFinite(y)) p.y = Math.min(Math.max(y, 0), WORLD_PX_H);
       p.facing = msg.facing === -1 ? -1 : 1;
       p.liquid = VALID_LIQUIDS.has(msg.liquid) ? msg.liquid : null;
       // Self-reported health. Each client owns its own, so this is how everyone else
       // learns it; bounded because it arrives from the network.
-      if (msg.health !== undefined) p.health = Math.min(Math.max(+msg.health || 0, 0), 100);
+      if (Number.isFinite(+msg.health)) p.health = Math.min(Math.max(+msg.health, 0), 100);
       p.dead = msg.dead === true;
       p.burning = msg.burning === true;
       const rotation = +msg.rotation;
@@ -387,6 +427,8 @@ wss.on('connection', (ws) => {
       // the exact result locally; applying the same values here is what keeps every
       // client identical, where re-running the spell would have re-rolled the
       // randomness and produced a different crater on the server than on screen.
+      if (!Array.isArray(msg.cells)) return;
+      if (!withinRate(ws, 'cells', Math.min(msg.cells.length, MAX_CELLS_PER_OP), MAX_CELLS_PER_SECOND)) return;
       applyCells(msg.cells);
     } else if (msg.t === 'hit') {
       // Player-versus-player damage is reported by the attacker and applied by the
@@ -394,6 +436,7 @@ wss.on('connection', (ws) => {
       // client, and bounded, because it arrives from the network.
       const targetId = room.players.has(String(msg.target || '')) ? String(msg.target) : null;
       if (targetId && targetId !== ws.playerId) {
+        if (!withinRate(ws, 'hits', 1, MAX_HITS_PER_SECOND)) return;
         const victim = room.players.get(targetId);
         const b = msg.bend && typeof msg.bend === 'object' ? msg.bend : null;
         const bounded = (v, min, max) => Number.isFinite(+v) ? Math.min(max, Math.max(min, +v)) : 0;
@@ -414,7 +457,7 @@ wss.on('connection', (ws) => {
     } else if (msg.t === 'blastImpulse') {
       const x = +msg.x, y = +msg.y, radius = +msg.radius, strength = +msg.strength;
       if (![x, y, radius, strength].every(Number.isFinite)
-        || x < 0 || x > COLS * 3 || y < 0 || y > ROWS * 3
+        || x < 0 || x > WORLD_PX_W || y < 0 || y > WORLD_PX_H
         || radius < 1 || radius > 600 || strength < 0 || strength > 420) return;
       broadcastToRoom(room, {
         t: 'blastImpulse', from: ws.playerId, x, y, radius, strength,
@@ -446,55 +489,118 @@ wss.on('connection', (ws) => {
   ws.on('close', () => {
     lobbyClients.delete(ws);
     leaveRoom(ws);
-    console.log(`player ${ws.playerId} disconnected`);
+    logger(`player ${ws.playerId} disconnected`);
   });
-});
+}
 
 // One tick drives every room. Rooms with nobody in them are skipped entirely — they
 // are about to be reaped, and simulating an empty world is pure waste.
 const SIM_STEP = 1000 / 40;
 
-setInterval(() => {
-  for (const room of rooms.values()) {
-    if (room.players.size === 0) continue;
-    W = room.world;
-    W.simulate();
-    if (W.dirty.size) {
-      const cells = [];
-      for (const id of W.dirty) cells.push([id, W.grid[id], W.life[id]]);
-      W.dirty.clear();
-      broadcastToRoom(room, { t: 'delta', cells });
+function startIntervals() {
+  tickTimers.push(setInterval(() => {
+    for (const room of rooms.values()) {
+      if (room.players.size === 0) continue;
+      W = room.world;
+      W.simulate();
+      if (W.dirty.size) {
+        const cells = [];
+        for (const id of W.dirty) cells.push([id, W.grid[id], W.life[id]]);
+        W.dirty.clear();
+        broadcastToRoom(room, { t: 'delta', cells });
+      }
     }
-  }
-}, SIM_STEP);
+  }, SIM_STEP));
 
-setInterval(() => {
-  for (const room of rooms.values()) {
-    if (room.players.size === 0) continue;
-    broadcastToRoom(room, { t: 'players', players: serializePlayers(room) });
-  }
-}, 50);
-
-setInterval(() => {
-  for (const room of rooms.values()) {
-    if (room.players.size === 0) continue;
-    W = room.world;
-    W.checkStructuralSupport();
-  }
-}, 120);
-
-// Reap rooms nobody has come back to. The grace period matters: it covers the moment
-// between a host creating a room and their game scene actually connecting to it.
-setInterval(() => {
-  const now = Date.now();
-  for (const [code, room] of rooms) {
-    if (room.players.size === 0 && room.emptySince && now - room.emptySince > EMPTY_ROOM_TTL_MS) {
-      rooms.delete(code);
-      console.log(`room ${code} expired`);
+  tickTimers.push(setInterval(() => {
+    for (const room of rooms.values()) {
+      if (room.players.size === 0) continue;
+      broadcastToRoom(room, { t: 'players', players: serializePlayers(room) });
     }
-  }
-  pushRoomList();
-}, 5000);
+  }, 50));
 
-console.log(`Falling-sand multiplayer server listening on ws://localhost:${PORT}`);
-console.log(`rooms are independent worlds; ${MAX_PLAYERS_PER_ROOM} players each, ${MAX_ROOMS} rooms max`);
+  tickTimers.push(setInterval(() => {
+    for (const room of rooms.values()) {
+      if (room.players.size === 0) continue;
+      W = room.world;
+      W.checkStructuralSupport();
+    }
+  }, 120));
+
+  // Reap rooms nobody has come back to. The grace period matters: it covers the moment
+  // between a host creating a room and their game scene actually connecting to it.
+  tickTimers.push(setInterval(() => {
+    const now = Date.now();
+    for (const [code, room] of rooms) {
+      if (room.players.size === 0 && room.emptySince && now - room.emptySince > EMPTY_ROOM_TTL_MS) {
+        rooms.delete(code);
+        logger(`room ${code} expired`);
+      }
+    }
+    pushRoomList();
+  }, 5000));
+
+  heartbeatTimer = setInterval(() => {
+    if (!wss) return;
+    for (const ws of wss.clients) {
+      if (ws.isAlive === false) { ws.terminate(); continue; }
+      ws.isAlive = false;
+      try { ws.ping(); } catch (e) { /* closing */ }
+    }
+  }, HEARTBEAT_MS);
+}
+
+async function startServer(opts = {}) {
+  if (wss) throw new Error('Multiplayer server is already running.');
+
+  const port = opts.port !== undefined
+    ? opts.port
+    : (process.env.PORT !== undefined && process.env.PORT !== '' ? Number(process.env.PORT) : DEFAULT_PORT);
+  const envSeed = process.env.SEED;
+  serverSeed = opts.seed !== undefined
+    ? opts.seed
+    : (envSeed !== undefined && envSeed !== '' ? Number(envSeed) >>> 0 : undefined);
+  logger = opts.quiet ? () => {} : console.log;
+
+  wss = new WebSocketServer({ port, maxPayload: opts.maxPayload ?? MAX_MESSAGE_BYTES });
+  wss.on('connection', handleConnection);
+  await new Promise((resolve, reject) => {
+    wss.once('listening', resolve);
+    wss.once('error', reject);
+  });
+
+  if (opts.simulate !== false) startIntervals();
+  const address = wss.address();
+  logger(`Falling-sand multiplayer server listening on ws://localhost:${address.port}`);
+  logger(`rooms are independent worlds; ${MAX_PLAYERS_PER_ROOM} players each, ${MAX_ROOMS} rooms max`);
+
+  return { wss, rooms, port: address.port, close: stopServer };
+}
+
+async function stopServer() {
+  for (const timer of tickTimers) clearInterval(timer);
+  tickTimers = [];
+  if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+
+  const server = wss;
+  wss = null;
+  if (server) {
+    for (const client of server.clients) {
+      try { client.terminate(); } catch (e) { /* already gone */ }
+    }
+    await new Promise((resolve) => server.close(() => resolve()));
+  }
+  rooms.clear();
+  lobbyClients.clear();
+  nextId = 1;
+  W = null;
+}
+
+module.exports = { startServer, stopServer };
+
+if (require.main === module) {
+  startServer().catch((err) => {
+    console.error(err);
+    process.exitCode = 1;
+  });
+}

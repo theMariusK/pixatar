@@ -155,7 +155,11 @@
   const NEIGHBORS8 = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [1, -1], [-1, 1]];
 
   // Background layer: purely visual, shown wherever a cell is EMPTY.
-  const BG = { SKY: 0, DIRT: 1, CAVE: 2, WOOD: 3, BRICK: 4, SANDSTONE: 5, WINDOW: 6, BEAM: 7, ROOF: 8 };
+  const BG = { SKY: 0, DIRT: 1, CAVE: 2, WOOD: 3, BRICK: 4, SANDSTONE: 5, WINDOW: 6, BEAM: 7, ROOF: 8, SUNSET: 9, DAY: 10, AURORA: 11, ASH: 12, CLOUD: 13 };
+
+  // Free-play map ids. The default is the original procedural town world.
+  const MAPS = ['town', 'arena', 'sky', 'north', 'caldera'];
+  const MAP_IDS = new Set(MAPS);
 
   // ---------- simulation ----------
 
@@ -189,7 +193,7 @@
       this.grid[id] = mat;
       this.life[id] = customLife !== undefined
         ? Math.min(customLife, 255)
-        : (mat === FIRE ? FIRE_LIFE : mat === SMOKE ? SMOKE_LIFE : mat === ICE ? ICE_LIFE : 0);
+        : Math.min(255, mat === FIRE ? FIRE_LIFE : mat === SMOKE ? SMOKE_LIFE : mat === ICE ? ICE_LIFE : 0);
       this.falling[id] = 0;
       this.fallDistance[id] = 0;
       this.mark(id);
@@ -658,6 +662,7 @@
       this.grid = world.grid;
       this.life = world.life;
       this.bg = world.bg;
+      this.map = MAP_IDS.has(opts.map) ? opts.map : 'town';
       this.seed = seed >>> 0;
       this.rng = mulberry32(this.seed);
       this.heights = new Int32Array(COLS); // first solid row of each column
@@ -739,27 +744,534 @@
       w.falling.fill(0);
       w.fallDistance.fill(0);
 
-      this.planBiomes();
-      this.shapeTerrain();
-      this.planStructures();
-      this.planLakes();
-      this.fillTerrain();
-      this.paintBackdrop();
-      this.carveCaves();
-      this.placeOres();
-      this.buildCrypt();
-      this.buildStructures();
-      this.placePockets();
-      this.fillCavePools();
-      this.fillLakes();
-      this.plantVegetation();
-      this.addBedrock();
-      this.pruneUnsupported();
+      if (this.map === 'arena') {
+        this.buildArenaWorld();
+      } else if (this.map === 'sky') {
+        this.buildSkyTempleWorld();
+      } else if (this.map === 'north') {
+        this.buildFrozenNorthWorld();
+      } else if (this.map === 'caldera') {
+        this.buildCalderaWorld();
+      } else {
+        this.planBiomes();
+        this.shapeTerrain();
+        this.planStructures();
+        this.planLakes();
+        this.fillTerrain();
+        this.paintBackdrop();
+        this.carveCaves();
+        this.placeOres();
+        this.buildCrypt();
+        this.buildStructures();
+        this.placePockets();
+        this.fillCavePools();
+        this.fillLakes();
+        this.plantVegetation();
+        this.addBedrock();
+        this.pruneUnsupported();
+      }
 
       w.falling.fill(0);
       w.fallDistance.fill(0);
       if (w.dirty) w.dirty.clear();
       w.seed = this.seed;
+    }
+
+    // The Agni Kai arena: a raised basalt duelling ground ringed by brick banners,
+    // tiered stands and lava braziers, under a Fire Nation sunset.
+    buildArenaWorld() {
+      const cx = COLS >> 1;
+      const groundY = Math.floor(ROWS * 0.68);
+      const arenaY = groundY - 9;
+      const x0 = cx - 110;
+      const x1 = cx + 110;
+
+      this.regions = [{ x0: 1, x1: COLS - 2, biome: BIOME.PLAINS }];
+      this.centerRegion = this.regions[0];
+      this.sites = [{ type: 'arena' }];
+      this.bg.fill(BG.SUNSET);
+
+      // A dark basalt plain with the arena raised above it.
+      for (let x = 1; x < COLS - 1; x++) {
+        const floor = x >= x0 && x <= x1 ? arenaY : groundY;
+        this.set(x, floor, STONE, this.hash(x, 0, 91) < 0.25 ? 3 : 2);
+        for (let y = floor + 1; y < ROWS - 1; y++) {
+          this.set(x, y, STONE, this.stoneVariant(x, y, floor));
+        }
+      }
+
+      // Three broad steps up to the plateau on each end.
+      for (const side of [-1, 1]) {
+        for (let k = 0; k < 3; k++) {
+          const top = side < 0 ? arenaY + 6 - k * 3 : arenaY + k * 3;
+          const start = side < 0 ? x0 - (3 - k) * 6 : x1 + 1 + k * 6;
+          const end = start + 5;
+          for (let x = start; x <= end; x++) {
+            this.set(x, top, SANDSTONE, this.blockVariant(x, top));
+            for (let y = top + 1; y < groundY; y++) {
+              this.set(x, y, BRICK, this.brickVariant(x, y, V.BRICK_STONE));
+            }
+          }
+        }
+      }
+
+      // Dueling floor: dark brick with concentric gold rings and a central seal.
+      for (let x = x0; x <= x1; x++) {
+        const dx = Math.abs(x - cx);
+        let mat = BRICK;
+        let variant = this.brickVariant(x, arenaY, V.BRICK_STONE);
+        if (dx <= 3) { mat = GOLD; variant = 1; }
+        else if (dx <= 9) { mat = BRICK; variant = V.BRICK_RED_DARK; }
+        else if ((dx >= 27 && dx <= 31) || (dx >= 68 && dx <= 71)) { mat = GOLD; variant = dx % 3 ? 0 : 1; }
+        else if (dx >= 100) { mat = BRICK; variant = V.BRICK_STONE_DARK; }
+        else if ((dx + 2) % 24 < 2) { mat = GOLD; variant = 0; }
+        this.set(x, arenaY, mat, variant);
+      }
+
+      // Tall brick walls with gold caps. The lower section is timber, which is
+      // solid enough to carry the wall but passable for bodies — an open gate.
+      const wallH = 18;
+      const gateH = this.doorH;
+      for (const wx of [x0, x1 - 5]) {
+        for (let x = wx; x < wx + 6; x++) {
+          for (let y = arenaY - wallH; y < arenaY; y++) {
+            if (y >= arenaY - gateH) {
+              this.set(x, y, TIMBER, y === arenaY - gateH ? V.DOOR_FRAME : V.DOOR);
+            } else {
+              this.set(x, y, BRICK, this.brickVariant(x, y, V.BRICK_RED));
+            }
+          }
+          this.set(x, arenaY - wallH - 1, GOLD, 1);
+        }
+      }
+
+      // Tiered stands rising away from the floor on both sides.
+      for (const side of [-1, 1]) {
+        for (let tier = 0; tier < 5; tier++) {
+          const top = arenaY - 4 - tier * 4;
+          const start = side < 0 ? x0 - 18 - tier * 18 : x1 + 1 + tier * 18;
+          const edge = side < 0 ? start : start + 17;
+          for (let x = start; x < start + 18; x++) {
+            this.set(x, top, BRICK, this.brickVariant(x, top, V.BRICK_RED));
+            for (let y = top + 1; y < groundY; y++) {
+              this.set(x, y, BRICK, this.brickVariant(x, y, V.BRICK_STONE_DARK));
+            }
+          }
+          this.set(edge, top - 1, GOLD, 1);
+        }
+      }
+
+      // Fire Nation columns with hanging red banners, framing the arena view.
+      for (const colX of [x0 - 20, x0 - 74, x1 + 15, x1 + 69]) {
+        for (let x = colX; x < colX + 5; x++) {
+          for (let y = arenaY - 72; y < groundY; y++) {
+            this.set(x, y, BRICK, this.brickVariant(x, y, V.BRICK_RED));
+          }
+          this.set(x, arenaY - 73, GOLD, 1);
+          this.set(x, arenaY - 74, GOLD, 0);
+          this.set(x, groundY - 1, GOLD, 1);
+        }
+        const bannerX = colX < cx ? colX + 5 : colX - 7;
+        for (let x = bannerX; x < bannerX + 7; x++) {
+          for (let y = arenaY - 68; y <= arenaY - 36; y++) {
+            const emblem = x >= bannerX + 2 && x <= bannerX + 4 && y >= arenaY - 56 && y <= arenaY - 51;
+            const trim = y === arenaY - 68 || y === arenaY - 36;
+            this.set(x, y, emblem ? GOLD : BRICK,
+              emblem ? 1 : trim ? V.BRICK_ROOF : V.BRICK_ROOF_DARK);
+          }
+        }
+      }
+
+      // Lava braziers flanking the fighting ground.
+      for (const bx of [cx - 70, cx + 70]) {
+        for (let x = bx - 2; x <= bx + 2; x++) {
+          for (let y = arenaY - 5; y < arenaY; y++) {
+            this.set(x, y, BRICK, this.brickVariant(x, y, V.BRICK_STONE_DARK));
+          }
+        }
+        this.set(bx - 2, arenaY - 6, GOLD, 1);
+        this.set(bx + 2, arenaY - 6, GOLD, 1);
+        for (let x = bx - 1; x <= bx + 1; x++) this.set(x, arenaY - 6, LAVA, 0);
+      }
+
+      this.addBedrock();
+      this.pruneUnsupported();
+    }
+
+    // A high Air Nomad temple: a cloud-wrapped mountain with broad temple
+    // precincts, slender tiered pagodas and bridges over two cloud-filled cuts.
+    buildSkyTempleWorld() {
+      const cx = COLS >> 1;
+      const baseY = 264;
+      const courtY = 198;
+      const heights = this.heights;
+      this.regions = [{ x0: 1, x1: COLS - 2, biome: BIOME.PLAINS }];
+      this.centerRegion = this.regions[0];
+      this.sites = [{ type: 'sky-temple' }];
+      this.biome.fill(BIOME.PLAINS);
+      this.bg.fill(BG.DAY);
+
+      // Broad mountain with two precinct plateaus and a cut on each side.
+      const ramp = (x, x0, x1, a, b) => Math.round(lerp(a, b, (x - x0) / (x1 - x0)));
+      for (let x = 1; x < COLS - 1; x++) {
+        let top;
+        if (x <= 40) top = ramp(x, 1, 40, baseY, courtY);
+        else if (x <= 145) top = courtY;
+        else if (x <= 158) top = ramp(x, 145, 158, courtY, courtY + 34);
+        else if (x <= 172) top = courtY + 34;
+        else if (x <= 185) top = ramp(x, 172, 185, courtY + 34, courtY);
+        else if (x <= 375) top = courtY;
+        else if (x <= 388) top = ramp(x, 375, 388, courtY, courtY + 34);
+        else if (x <= 402) top = courtY + 34;
+        else if (x <= 415) top = ramp(x, 402, 415, courtY + 34, courtY);
+        else if (x <= 520) top = courtY;
+        else top = ramp(x, 520, COLS - 2, courtY, baseY);
+
+        const flat = (x >= 40 && x <= 145) || (x >= 185 && x <= 375) || (x >= 415 && x <= 520);
+        if (!flat) top += Math.round((this.noise(401, x * 0.045, 0, 3) - 0.5) * 6);
+        heights[x] = clamp(top, 120, ROWS - 90);
+      }
+      heights[0] = heights[1];
+      heights[COLS - 1] = heights[COLS - 2];
+
+      for (let x = 1; x < COLS - 1; x++) {
+        const top = heights[x];
+        const precinct = (x >= 40 && x <= 145) || (x >= 185 && x <= 375) || (x >= 415 && x <= 520);
+        if (precinct) {
+          this.set(x, top, SANDSTONE, this.blockVariant(x, top));
+          this.set(x, top + 1, SANDSTONE, this.blockVariant(x, top + 1));
+          for (let y = top + 2; y < ROWS - 1; y++) this.set(x, y, STONE, this.stoneVariant(x, y, top));
+        } else {
+          this.set(x, top, GRASS, this.randVariant(GRASS, x, top));
+          this.set(x, top + 1, DIRT, this.randVariant(DIRT, x, top + 1));
+          for (let y = top + 2; y < ROWS - 1; y++) this.set(x, y, STONE, this.stoneVariant(x, y, top));
+        }
+      }
+
+      // Cliff faces where the precincts meet the mountain.
+      for (const edge of [40, 145, 185, 375, 415, 520]) {
+        for (let y = heights[edge] + 1; y <= heights[edge] + 8; y++) {
+          this.set(edge, y, SANDSTONE, this.blockVariant(edge, y));
+        }
+      }
+
+      // The air symbol on the main courtyard: concentric gold rings.
+      for (let x = 185; x <= 375; x++) {
+        const dx = Math.abs(x - cx);
+        if (dx <= 4 || (dx >= 34 && dx <= 37) || (dx >= 61 && dx <= 63) || (dx >= 88 && dx <= 90)) {
+          this.set(x, courtY, GOLD, dx % 3 ? 0 : 1);
+        }
+      }
+
+      // Low central dais, with a ring of gold on its top and a pair of lanterns.
+      const daisY = courtY - 2;
+      for (let x = cx - 27; x <= cx + 27; x++) {
+        const dx = Math.abs(x - cx);
+        for (let y = daisY; y < courtY; y++) {
+          this.set(x, y, dx >= 25 ? GOLD : SANDSTONE,
+            dx >= 25 ? 1 : this.blockVariant(x, y));
+        }
+        if (dx <= 3 || (dx >= 16 && dx <= 18)) this.set(x, daisY, GOLD, dx % 3 ? 0 : 1);
+      }
+      for (const lx of [cx - 20, cx + 20]) {
+        for (let x = lx - 1; x <= lx + 1; x++) {
+          for (let y = daisY - 8; y < daisY; y++) this.set(x, y, SANDSTONE, this.blockVariant(x, y));
+          this.set(x, daisY - 9, GOLD, 1);
+        }
+      }
+
+      // Main temples, gate pavilions and the shrines on the side precincts.
+      this.buildSkyPagoda(235, courtY, 14, 112, { hall: true });
+      this.buildSkyPagoda(325, courtY, 14, 112, { hall: true });
+      this.buildSkyPagoda(198, courtY, 6, 40);
+      this.buildSkyPagoda(362, courtY, 6, 40);
+      this.buildSkyPagoda(110, courtY, 9, 54);
+      this.buildSkyPagoda(450, courtY, 9, 54);
+
+      // Bridges over the two cuts, with prayer banners hanging beneath them.
+      for (const [x0, x1] of [[145, 185], [375, 415]]) {
+        for (let x = x0; x <= x1; x++) {
+          this.set(x, courtY, WOOD, x % 3 ? V.WOOD_PLANK : V.WOOD_DARK);
+          this.set(x, courtY + 1, WOOD, V.WOOD_DARK);
+          if (x % 7 === 0) this.set(x, courtY - 1, TIMBER, V.WOOD_DARK);
+        }
+        for (let x = x0 + 4; x <= x1 - 2; x += 8) {
+          for (let y = courtY + 2; y <= courtY + 6; y++) {
+            this.set(x, y, BRICK, this.brickVariant(x, y, V.BRICK_ROOF_DARK));
+            this.set(x + 1, y, BRICK, this.brickVariant(x + 1, y, V.BRICK_RED_DARK));
+          }
+          this.set(x, courtY + 7, GOLD, 1);
+          this.set(x + 1, courtY + 7, GOLD, 0);
+        }
+      }
+
+      // Trees on the side precincts and the lower slopes.
+      for (const x of [65, 130, 430, 495]) this.oak(x, courtY);
+      for (const x of [15, 520, 548]) {
+        const y = heights[x];
+        if (y < ROWS - 20) this.bush(x, y);
+      }
+
+      // Cloud banks behind the temple and wisps in the cuts.
+      this.cloud(90, 135, 85, 15);
+      this.cloud(470, 150, 90, 16);
+      this.cloud(280, 100, 125, 18);
+      this.cloud(175, 205, 38, 11);
+      this.cloud(390, 225, 42, 10);
+      this.cloud(55, 240, 70, 18);
+      this.cloud(510, 235, 65, 17);
+
+      this.addBedrock();
+      this.pruneUnsupported();
+    }
+
+    cloud(cx, cy, rx, ry) {
+      for (let y = Math.max(1, cy - ry); y <= Math.min(ROWS - 2, cy + ry); y++) {
+        for (let x = Math.max(1, cx - rx); x <= Math.min(COLS - 2, cx + rx); x++) {
+          const nx = (x - cx) / rx, ny = (y - cy) / ry;
+          const d = nx * nx + ny * ny;
+          if (d >= 1) continue;
+          const n = this.noise(501, x * 0.08, y * 0.11, 2);
+          if (n * 0.9 + (1 - d) * 0.5 > 0.52) this.setBg(x, y, BG.CLOUD);
+        }
+      }
+    }
+
+    buildSkyPagoda(px, floor, halfW, height, opts = {}) {
+      const hall = !!opts.hall;
+      const plinthH = hall ? 3 : 5;
+      const top = floor - height;
+      const bodyBottom = floor - plinthH - 1;
+      const hallTop = bodyBottom - 19;
+      const doorTop = bodyBottom - (this.doorH - 1);
+
+      // Broad stone plinth with a gold lip. Hall pagodas use a lower plinth so the
+      // doorway is a single three-cell step up from the courtyard.
+      for (let x = px - halfW - 3; x <= px + halfW + 3; x++) {
+        for (let y = floor - plinthH; y < floor; y++) this.set(x, y, SANDSTONE, this.blockVariant(x, y));
+        this.set(x, floor - plinthH - 1, GOLD, 1);
+      }
+
+      // Body. Hall pagodas are hollow at ground level; the upper storeys taper.
+      for (let y = top; y <= bodyBottom; y++) {
+        const t = (bodyBottom - y) / Math.max(1, height - plinthH);
+        const hw = Math.max(3, halfW - Math.floor(t * 3));
+        const band = (floor - y) % 14 < 2;
+        for (let x = px - hw; x <= px + hw; x++) {
+          if (hall && y >= hallTop) {
+            const inner = x > px - halfW + 2 && x < px + halfW - 2;
+            if (inner) {
+              this.set(x, y, EMPTY);
+              this.setBg(x, y, BG.SANDSTONE);
+              continue;
+            }
+            if (y >= doorTop && y <= bodyBottom) {
+              this.set(x, y, TIMBER, y === doorTop ? V.DOOR_FRAME : V.DOOR);
+              continue;
+            }
+          }
+          const edge = x === px - hw || x === px + hw;
+          this.set(x, y, edge || band ? BRICK : SANDSTONE,
+            edge || band ? this.brickVariant(x, y, V.BRICK_STONE) : this.blockVariant(x, y));
+        }
+        if (!(hall && y >= hallTop) && hw >= 4 && (floor - y) % 11 === 0) {
+          for (let x = px - 2; x <= px + 2; x++) this.set(x, y, GLASS, (x + y) % 2);
+        }
+      }
+
+      // Ground-floor shrine: a low altar on the right side of the hall.
+      if (hall) {
+        // Soft daylight through the back wall of the shrine.
+        for (let wx = px - 3; wx <= px + 2; wx++) {
+          for (let wy = bodyBottom - 13; wy <= bodyBottom - 10; wy++) this.setBg(wx, wy, BG.WINDOW);
+        }
+        for (let x = px + halfW - 9; x <= px + halfW - 5; x++) {
+          this.set(x, bodyBottom, SANDSTONE, this.blockVariant(x, bodyBottom));
+          this.set(x, bodyBottom - 1, GOLD, 1);
+        }
+      }
+
+      // Four tiered roofs with gold upturned tips. Hall pagodas sit their lowest
+      // eave above the doorway.
+      const roofBase = hall ? floor - 16 : floor - 12;
+      for (let level = 0; level < 4; level++) {
+        const ry = roofBase - Math.round((level * (height - 18)) / 3);
+        const spread = halfW + 4 - level;
+        for (let r = 0; r < 3; r++) {
+          const s2 = spread - r;
+          for (let x = px - s2; x <= px + s2; x++) {
+            this.set(x, ry - r, BRICK, this.brickVariant(x, ry - r, level % 2 ? V.BRICK_ROOF_DARK : V.BRICK_ROOF));
+          }
+        }
+        this.set(px - spread, ry - 1, GOLD, 1);
+        this.set(px + spread, ry - 1, GOLD, 1);
+      }
+
+      // Meditation spire and finial.
+      for (let y = top - 7; y < top; y++) this.set(px, y, GOLD, 1);
+      this.set(px, top - 8, GOLD, 0);
+    }
+
+    // A frozen northern settlement: snowfields, a frozen lake and an ice palace.
+    buildFrozenNorthWorld() {
+      const groundY = 210;
+      const lake0 = 50, lake1 = 170, lakeFloor = groundY + 7;
+      this.regions = [{ x0: 1, x1: COLS - 2, biome: BIOME.TUNDRA }];
+      this.centerRegion = this.regions[0];
+      this.sites = [{ type: 'frozen-north' }];
+      this.biome.fill(BIOME.TUNDRA);
+      this.bg.fill(BG.AURORA);
+
+      for (let x = 1; x < COLS - 1; x++) {
+        const lake = x > lake0 && x < lake1;
+        const floor = lake ? lakeFloor : groundY;
+        if (!lake) {
+          this.set(x, floor, SNOW, this.randVariant(SNOW, x, floor));
+          this.set(x, floor + 1, SNOW, this.randVariant(SNOW, x, floor + 1));
+          this.set(x, floor + 2, DIRT, this.randVariant(DIRT, x, floor + 2));
+          for (let y = floor + 3; y < ROWS - 1; y++) this.set(x, y, STONE, this.stoneVariant(x, y, floor));
+        } else {
+          for (let y = floor; y < ROWS - 1; y++) this.set(x, y, STONE, this.stoneVariant(x, y, floor));
+        }
+      }
+
+      // Water under a sheet of lake ice; the right half stays open for bending.
+      for (let x = lake0 + 1; x < lake1; x++) {
+        for (let y = groundY + 2; y < lakeFloor; y++) this.set(x, y, WATER, 0);
+      }
+      for (let x = lake0 + 1; x <= lake0 + 64; x++) {
+        this.set(x, groundY + 1, PACKED_ICE, this.randVariant(PACKED_ICE, x, groundY + 1));
+      }
+
+      // Two cabins flanking the spawn, snow-capped after they are built.
+      this.buildHouse({ x0: 215, w: 34, floor: groundY, storeys: 1, style: 'cabin' });
+      this.buildHouse({ x0: 325, w: 36, floor: groundY, storeys: 1, style: 'cabin' });
+      this.snowCap(205, 365, groundY - 48, groundY, 0.62);
+
+      // Ice palace on the right: hollow halls behind passable timber gates.
+      const px0 = 430, px1 = 525, ptop = groundY - 46;
+      for (let x = px0; x <= px1; x++) {
+        const wall = x <= px0 + 5 || x >= px1 - 5;
+        for (let y = ptop; y < groundY; y++) {
+          if (wall && y >= groundY - this.doorH) {
+            this.set(x, y, TIMBER, y === groundY - this.doorH ? V.DOOR_FRAME : V.DOOR);
+          } else if (wall || y === ptop) {
+            this.set(x, y, PACKED_ICE, this.randVariant(PACKED_ICE, x, y));
+          } else {
+            this.set(x, y, EMPTY);
+            this.setBg(x, y, y % 9 === 0 ? BG.WINDOW : BG.BRICK);
+          }
+        }
+      }
+      for (let x = px0 - 2; x <= px1 + 2; x++) {
+        this.set(x, ptop - 1, PACKED_ICE, this.randVariant(PACKED_ICE, x, ptop - 1));
+        if ((x - px0) % 8 < 3) this.set(x, ptop - 2, SNOW, this.randVariant(SNOW, x, ptop - 2));
+      }
+      for (const tx of [px0 + 4, px1 - 12]) {
+        for (let x = tx; x < tx + 8; x++) {
+          for (let y = ptop - 22; y < ptop - 1; y++) {
+            const edge = x === tx || x === tx + 7 || y === ptop - 22;
+            if (edge) this.set(x, y, PACKED_ICE, this.randVariant(PACKED_ICE, x, y));
+          }
+        }
+      }
+
+      for (const x of [30, 195, 385, 545]) this.pine(x, groundY);
+      this.addBedrock();
+      this.pruneUnsupported();
+    }
+
+    snowCap(x0, x1, y0, y1, chance) {
+      for (let y = Math.max(1, y0); y <= Math.min(ROWS - 2, y1); y++) {
+        for (let x = Math.max(1, x0); x <= Math.min(COLS - 2, x1); x++) {
+          if (this.get(x, y) !== EMPTY && this.get(x, y - 1) === EMPTY && this.chance(chance)) {
+            this.set(x, y - 1, SNOW, this.randVariant(SNOW, x, y - 1));
+          }
+        }
+      }
+    }
+
+    // A volcanic caldera split by a bridge, with lava below and foundries above.
+    buildCalderaWorld() {
+      const cx = COLS >> 1;
+      const rimY = 205;
+      const caldera0 = 170, caldera1 = 390;
+      const inner0 = caldera0 + 4, inner1 = caldera1 - 4;
+      const lavaTop = 228, lavaFloor = 248;
+      this.regions = [{ x0: 1, x1: COLS - 2, biome: BIOME.PLAINS }];
+      this.centerRegion = this.regions[0];
+      this.sites = [{ type: 'caldera' }];
+      this.biome.fill(BIOME.PLAINS);
+      this.bg.fill(BG.ASH);
+
+      for (let x = 1; x < COLS - 1; x++) {
+        if (x > inner0 && x < inner1) {
+          for (let y = lavaFloor; y < ROWS - 1; y++) this.set(x, y, STONE, this.stoneVariant(x, y, lavaFloor));
+          for (let y = lavaTop; y < lavaFloor; y++) this.set(x, y, LAVA, 0);
+        } else {
+          this.set(x, rimY, STONE, this.hash(x, 0, 111) < 0.22 ? 3 : 2);
+          for (let y = rimY + 1; y < ROWS - 1; y++) this.set(x, y, STONE, this.stoneVariant(x, y, rimY));
+        }
+      }
+
+      // Bridge across the caldera, carried by its rock walls at both ends.
+      for (let x = caldera0; x <= caldera1; x++) {
+        this.set(x, rimY, SANDSTONE, this.blockVariant(x, rimY));
+        this.set(x, rimY + 1, BRICK, this.brickVariant(x, rimY + 1, V.BRICK_STONE_DARK));
+      }
+      for (const px of [cx - 50, cx + 50]) {
+        for (let x = px - 2; x <= px + 2; x++) {
+          for (let y = rimY + 2; y < lavaFloor; y++) {
+            this.set(x, y, STONE, this.stoneVariant(x, y, rimY));
+          }
+        }
+      }
+      // Gold markers along the bridge, low enough to step over.
+      for (let x = caldera0 + 12; x < caldera1; x += 28) this.set(x, rimY - 1, GOLD, 1);
+
+      this.buildCalderaFactory(30, 150, rimY);
+      this.buildCalderaFactory(410, 530, rimY);
+      this.addBedrock();
+      this.pruneUnsupported();
+    }
+
+    buildCalderaFactory(x0, x1, floor) {
+      const top = floor - 52;
+      for (let x = x0 - 2; x <= x1 + 2; x++) {
+        for (let y = floor; y <= floor + 2; y++) this.set(x, y, BRICK, this.brickVariant(x, y, V.BRICK_STONE_DARK));
+      }
+      for (let y = top; y < floor; y++) {
+        for (let x = x0; x <= x1; x++) {
+          const wall = x <= x0 + 4 || x >= x1 - 4;
+          if (wall && y >= floor - this.doorH) {
+            this.set(x, y, TIMBER, y === floor - this.doorH ? V.DOOR_FRAME : V.DOOR);
+          } else if (wall || y === top) {
+            this.set(x, y, BRICK, this.brickVariant(x, y, V.BRICK_RED));
+          } else {
+            this.set(x, y, EMPTY);
+            this.setBg(x, y, BG.BRICK);
+          }
+        }
+      }
+      for (const wy of [top + 10, top + 24]) {
+        for (const wx of [x0, x1 - 1]) {
+          for (let y = wy; y < wy + 4; y++) {
+            this.set(wx, y, GLASS, (wx + y) % 3 === 0 ? 1 : 0);
+            this.set(wx + 1, y, GLASS, (wx + y) % 3 === 0 ? 0 : 1);
+          }
+        }
+      }
+      for (const chx of [x0 + 12, x1 - 22]) {
+        for (let x = chx; x < chx + 7; x++) {
+          for (let y = top - 34; y < top; y++) {
+            this.set(x, y, BRICK, this.brickVariant(x, y, V.BRICK_RED));
+          }
+        }
+        for (let x = chx; x < chx + 7; x++) this.set(x, top - 35, GOLD, 1);
+        for (let y = top - 32; y < top; y += 8) {
+          for (let x = chx; x < chx + 7; x++) this.set(x, y, GOLD, 0);
+        }
+      }
     }
 
     // -- biomes and terrain shape --
@@ -2014,7 +2526,8 @@
     }
   }
 
-  // opts: { bodyScale, cellSize, jumpCells, stepUpCells } — see Generator.
+  // opts: { bodyScale, cellSize, jumpCells, stepUpCells, map } — see Generator.
+  // map is 'town' (default procedural world) or 'arena' (Agni Kai arena).
   function generateWorld(world, seed, opts) {
     if (seed === undefined || seed === null || Number.isNaN(seed)) seed = Math.floor(Math.random() * 0x7fffffff);
     const gen = new Generator(world, seed, opts);
@@ -2076,6 +2589,61 @@
           case BG.ROOF:
             if (y % 2) { r = 78; g = 34; b = 30; } else { r = 92; g = 40; b = 34; }
             break;
+          case BG.SUNSET: {
+            // Agni Kai sky: deep violet overhead fading into a burning horizon.
+            const horizon = Math.max(0, 1 - Math.abs(t - 0.58) * 2.4);
+            const glow = horizon * horizon;
+            const o = (h - 0.5) * 7;
+            r = 30 + glow * 155 + o;
+            g = 18 + glow * 74 + o;
+            b = 48 + glow * 24 + o;
+            if (y > ROWS * 0.35 && h < 0.0022) { r = 255; g = 178; b = 82; }
+            break;
+          }
+          case BG.DAY: {
+            // Bright high-altitude daylight with a few thin clouds.
+            r = lerp(88, 206, t) + (h - 0.5) * 4;
+            g = lerp(132, 230, t) + (h - 0.5) * 4;
+            b = lerp(204, 247, t);
+            const cloud = noise2(201, x * 0.012, y * 0.03);
+            if (cloud > 0.62 && y < ROWS * 0.55) {
+              const c = (cloud - 0.62) * 130;
+              r += c; g += c; b += c * 0.7;
+            }
+            break;
+          }
+          case BG.AURORA: {
+            // Polar night with green and violet curtains.
+            r = lerp(8, 26, t) + (h - 0.5) * 5;
+            g = lerp(20, 38, t) + (h - 0.5) * 5;
+            b = lerp(44, 56, t) + (h - 0.5) * 6;
+            const band = Math.pow(Math.max(0, noise2(202, x * 0.006, y * 0.014) - 0.36), 1.5);
+            if (y < ROWS * 0.68) {
+              r += band * 64;
+              g += band * 235;
+              b += band * 170;
+            }
+            break;
+          }
+          case BG.ASH: {
+            // Caldera haze: black ash with a dull red glow near the horizon.
+            const glow = Math.max(0, 1 - Math.abs(t - 0.7) * 2.2);
+            const o = (h - 0.5) * 9;
+            r = 18 + glow * 86 + o;
+            g = 15 + glow * 28 + o;
+            b = 18 + glow * 14 + o;
+            if (h < 0.0018) { r += 70; g += 34; b += 10; }
+            break;
+          }
+          case BG.CLOUD: {
+            // Soft high-altitude cloud banks.
+            const n = noise2(203, x * 0.075, y * 0.075, 2);
+            const n2 = noise2(204, x * 0.025, y * 0.04);
+            r = 176 + n * 62 + n2 * 12;
+            g = 194 + n * 48 + n2 * 12;
+            b = 216 + n * 32 + n2 * 10;
+            break;
+          }
           default: // sky, with a few stars up high
             if (y < ROWS * 0.35 && h < 0.0025) {
               const s = 110 + h * 40000;
@@ -2084,9 +2652,9 @@
               r = sr; g = sg; b = sb;
             }
         }
-        out[i * 3] = r;
-        out[i * 3 + 1] = g;
-        out[i * 3 + 2] = b;
+        out[i * 3] = clamp(r, 0, 255);
+        out[i * 3 + 1] = clamp(g, 0, 255);
+        out[i * 3 + 2] = clamp(b, 0, 255);
       }
     }
     return out;
@@ -2095,7 +2663,7 @@
   return {
     COLS, ROWS, SIZE, MAT, MAT_COUNT, FIRE_LIFE, SMOKE_LIFE, ICE_LIFE, BG, V, DEFAULT_BODY_SCALE,
     IS_SOLID, BLOCKS_BODY, IS_RIGID, IS_OPEN, IS_LIQUID, FLAMMABILITY, BURN_LIFE, ACID_RATE, PALETTE, NAMES,
-    IMPACT_RESISTANCE,
+    IMPACT_RESISTANCE, MAPS, MAP_IDS,
     World, generateWorld, buildBackdrop, segmentRectEntry, segmentEntersRect, impactDamage,
   };
 });

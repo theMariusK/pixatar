@@ -1,5 +1,20 @@
 # pixatar
 
+## Free play maps
+
+Free play starts with **Town**, the procedural town-and-wilderness map. The free-play
+menu also offers:
+
+- **Agni Kai Arena** — a raised basalt duelling ground with tiered stands, red
+  banners, gate walls and lava braziers under a sunset sky.
+- **Sky Temple** — a cloud-wrapped mountain with broad temple precincts, tiered
+  Air Nomad pagodas, walk-in ground-floor shrine halls, canyon bridges and long
+  vertical drops.
+- **Frozen North** — aurora skies, snowfields, a frozen lake with open water, timber
+  cabins and an ice palace.
+- **Volcanic Caldera** — a bridge over a lava lake, flanked by fire-nation foundries,
+  chimneys and destructible industrial structures.
+
 ## Bending controls
 
 Hold **Q** and select an element, Bolt/Orbit, and an action. Bolt/Orbit controls how
@@ -74,3 +89,26 @@ Successful guards show a curved block mark; timed blocks add a second bright arc
 and a sharper sound. Repeated contacts are throttled, and camera cues share a
 cooldown so sustained attacks stay readable. Offscreen contacts do not shake the
 camera.
+
+## Running multiplayer
+
+Start the room server with `npm start` (or `node server.js`). It listens on `PORT`
+(default `8080`) and uses `SEED=<number>` when you want every room to generate the
+same world.
+
+The browser client connects to `ws://<page-host>:8080` by default. If the server
+runs elsewhere, pass an endpoint explicitly:
+
+```
+index.html?server=ws://192.168.1.5:9000
+```
+
+`?server=` accepts `http(s)://` URLs too and upgrades them to `ws(s)://`, which is
+handy behind a reverse proxy. Setting `window.MULTIPLAYER_URL` before the scripts
+load works as well.
+
+## Tests
+
+`npm test` runs the Node test suite: bending/abilities, attack control, the game
+scene's network handling, world simulation, world generation, endpoint resolution,
+and live WebSocket server integration tests.

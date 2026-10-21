@@ -40,8 +40,39 @@ function seedFromUrl() {
 // the head and the feet.
 const DIG_RADIUS = Math.ceil(PLAYER_BOX.h / PIXEL / 2) + 1;
 
+// Horizontal movement is velocity-driven so the body eases into and out of a run
+// instead of snapping between 0 and top speed. Ground movement responds faster than
+// air control, and liquids are slower and more sluggish.
+const MOVE_SPEED = 90;
+const MOVE_SPEED_LIQUID = 60;
+const MOVE_ACCEL_GROUND = 1100;
+const MOVE_DECEL_GROUND = 1500;
+const MOVE_ACCEL_AIR = 620;
+const MOVE_DECEL_AIR = 420;
+const MOVE_ACCEL_LIQUID = 520;
+
+// The camera trails the player slightly, which turns hard-locked per-pixel scrolling
+// into steady motion. A large jump (respawn, teleport) snaps instead of panning.
+const CAMERA_RESPONSE = 16;
+const CAMERA_SNAP_DISTANCE = 260;
+
+// Remote bodies render slightly in the past and interpolate between the 20 Hz
+// snapshots the server sends. Two broadcasts of delay covers normal jitter without
+// adding noticeable input lag to anyone else's view.
+const REMOTE_INTERP_DELAY_MS = 90;
+const REMOTE_SNAP_DISTANCE = 240;
+const REMOTE_SAMPLE_LIMIT = 12;
+
 const NEIGHBORS4 = [[1, 0], [-1, 0], [0, 1], [0, -1]];
 const NEIGHBORS8 = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [1, -1], [-1, 1]];
+
+const FREE_PLAY_MAP_NAMES = {
+  town: 'Town',
+  arena: 'Agni Kai Arena',
+  sky: 'Sky Temple',
+  north: 'Frozen North',
+  caldera: 'Volcanic Caldera',
+};
 
 // ---------- concentric spell wheel ----------
 // E assembles the secondary spell through element -> form -> modifier.
@@ -116,6 +147,7 @@ class SandScene extends Phaser.Scene {
     this.prejoined = (data && data.prejoined) || null;
     this.campaign = !!(data && data.campaign);
     this.level = (data && data.level) || 1;
+    this.map = data && PixelWorld.MAP_IDS.has(data.map) ? data.map : 'town';
   }
 
   create() {
@@ -136,6 +168,8 @@ class SandScene extends Phaser.Scene {
     this.generateWorld(seedFromUrl());
 
     this.multiplayer = false;
+    this.netDisconnected = false;
+    this.netError = null;
     this.netId = null;
     this.netColor = 0xf0f0f0;
     this.remotePlayers = {};
@@ -288,6 +322,7 @@ class SandScene extends Phaser.Scene {
     });
 
     this.cameras.main.setBounds(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+    this.cameraReady = false;
 
     this.input.mouse.disableContextMenu();
     this.input.on('wheel', (_pointer, _objects, _dx, dy) => this.attackControl.adjustSize(-Math.sign(dy)));
@@ -400,7 +435,9 @@ class SandScene extends Phaser.Scene {
     this.attackControl?.clear();
     this.bendAbilities?.clear();
     this.bendingDamage?.clear();
-    const info = PixelWorld.generateWorld(this.world, seed, { bodyScale: CHAR_SCALE, stepUpCells: STEP_UP_CELLS });
+    const info = PixelWorld.generateWorld(this.world, seed, {
+      bodyScale: CHAR_SCALE, stepUpCells: STEP_UP_CELLS, map: this.map,
+    });
     this.world.onRigidImpact = (hit) => {
       if (!this.multiplayer) this.handleRigidFallImpact(hit);
     };
@@ -408,7 +445,7 @@ class SandScene extends Phaser.Scene {
     if (this.remoteFallImpactAt) this.remoteFallImpactAt.clear();
     if (this.debris) this.debris.length = 0;
     this.buildBackdrop();
-    console.log(`world seed ${info.seed}:`, info.regions.map((r) => r.biome).join(' / '), '|', info.structures.join(', '));
+    console.log(`world seed ${info.seed} (${this.map}):`, info.regions.map((r) => r.biome).join(' / '), '|', info.structures.join(', '));
   }
 
   buildBackdrop() {
@@ -664,7 +701,7 @@ class SandScene extends Phaser.Scene {
       ? (this.multiplayer
           ? `MULTIPLAYER  ${this.roomName || 'room'}  [${this.roomId || '?'}]`
           : (this.netError ? `connection failed: ${this.netError}` : 'connecting...'))
-      : 'SINGLEPLAYER  free play';
+      : `SINGLEPLAYER  free play · ${FREE_PLAY_MAP_NAMES[this.map] || 'Town'}`;
     this.hudText.setText([
       mode,
       '',
@@ -781,11 +818,25 @@ class SandScene extends Phaser.Scene {
       return;
     }
 
-    const speed = p.liquid ? 60 : 90;
+    const speed = p.liquid ? MOVE_SPEED_LIQUID : MOVE_SPEED;
     let ax = 0;
     if (k.left.isDown || k.a.isDown) { ax = -1; p.facing = -1; }
     else if (k.right.isDown || k.d.isDown) { ax = 1; p.facing = 1; }
-    p.vx = ax * speed;
+
+    // Ease the horizontal velocity toward the input direction. Acceleration and
+    // friction are time-based, so the feel does not change with frame rate.
+    const targetVx = ax * speed;
+    const accel = p.liquid ? MOVE_ACCEL_LIQUID : (p.grounded ? MOVE_ACCEL_GROUND : MOVE_ACCEL_AIR);
+    const decel = p.liquid ? MOVE_ACCEL_LIQUID : (p.grounded ? MOVE_DECEL_GROUND : MOVE_DECEL_AIR);
+    const rate = (ax !== 0 ? accel : decel) * dt;
+    if (ax !== 0) {
+      const delta = targetVx - p.vx;
+      p.vx += Math.sign(delta) * Math.min(Math.abs(delta), rate);
+    } else {
+      const delta = -p.vx;
+      p.vx += Math.sign(delta) * Math.min(Math.abs(delta), rate);
+      if (Math.abs(p.vx) < 2) p.vx = 0;
+    }
 
     const nx = p.x + (p.vx + p.impulseX) * dt;
     if (p.bendDashUntil > this.time.now) {
@@ -797,18 +848,23 @@ class SandScene extends Phaser.Scene {
       }
     } else if (!this.rectSolid(nx, p.y, p.w, p.h)) {
       p.x = nx;
-    } else if (p.vx !== 0 && (p.grounded || p.liquid)) {
+    } else if (Math.abs(p.vx) > 0.5 && (p.grounded || p.liquid)) {
       // step up small ledges (roots, rubble, crates, foundations) instead of stopping dead
+      let stepped = false;
       for (let s = 1; s <= STEP_UP_CELLS; s++) {
         if (!this.rectSolid(nx, p.y - s * PIXEL, p.w, p.h)) {
           p.x = nx;
           p.y -= s * PIXEL;
+          stepped = true;
           break;
         }
       }
       p.impulseX = 0;
+      if (!stepped) p.vx = 0;
     } else {
+      // Pressing into a wall should idle, not run in place.
       p.impulseX = 0;
+      p.vx = 0;
     }
     p.impulseX *= Math.exp(-3.2 * dt);
     if (Math.abs(p.impulseX) < 2) p.impulseX = 0;
@@ -1102,8 +1158,8 @@ class SandScene extends Phaser.Scene {
     if (Math.hypot(pcx - x, pcy - y) < rPx) out.push({ self: true, x: pcx, y: pcy });
     for (const id in this.remotePlayers) {
       if (id === this.netId) continue;
-      const rp = this.remotePlayers[id];
-      const rx = rp.x + PLAYER_BOX.w / 2, ry = rp.y + PLAYER_BOX.h / 2;
+      const pos = this.remoteBodyPos(id);
+      const rx = pos.x + PLAYER_BOX.w / 2, ry = pos.y + PLAYER_BOX.h / 2;
       if (Math.hypot(rx - x, ry - y) < rPx) out.push({ self: false, x: rx, y: ry, id });
     }
     // Enemies are targets for exactly the same magic the player is.
@@ -1316,7 +1372,8 @@ class SandScene extends Phaser.Scene {
       if (id === this.netId) continue;
       const rp = this.remotePlayers[id];
       if (rp.dead || rp.health <= 0) continue;
-      out.push({ key: `remote:${id}`, target: rp, x: rp.x, y: rp.y, w: PLAYER_BOX.w, h: PLAYER_BOX.h, remoteId: id });
+      const pos = this.remoteBodyPos(id);
+      out.push({ key: `remote:${id}`, target: rp, x: pos.x, y: pos.y, w: PLAYER_BOX.w, h: PLAYER_BOX.h, remoteId: id });
     }
     for (const enemy of this.enemies.list) {
       if (enemy.dead || enemy.health <= 0) continue;
@@ -1555,9 +1612,9 @@ class SandScene extends Phaser.Scene {
     let target = null, best = Infinity;
     for (const id in this.remotePlayers) {
       if (id === this.netId) continue;
-      const rp = this.remotePlayers[id];
-      const d = Phaser.Math.Distance.Between(pr.x, pr.y, rp.x, rp.y);
-      if (d < best && d > MIN_TARGET_DIST) { best = d; target = rp; }
+      const pos = this.remoteBodyPos(id);
+      const d = Phaser.Math.Distance.Between(pr.x, pr.y, pos.x, pos.y);
+      if (d < best && d > MIN_TARGET_DIST) { best = d; target = pos; }
     }
     if (!target) {
       for (const d of this.debris) {
@@ -1600,8 +1657,8 @@ class SandScene extends Phaser.Scene {
     }
     for (const id in this.remotePlayers) {
       if (id === this.netId) continue;
-      const rp = this.remotePlayers[id];
-      const rx = rp.x + PLAYER_BOX.w / 2, ry = rp.y + PLAYER_BOX.h / 2;
+      const pos = this.remoteBodyPos(id);
+      const rx = pos.x + PLAYER_BOX.w / 2, ry = pos.y + PLAYER_BOX.h / 2;
       if (Math.hypot(pr.x - rx, pr.y - ry) < reach) return { self: false, x: rx, y: ry };
     }
     for (const e of this.enemies.list) {
@@ -2967,13 +3024,27 @@ class SandScene extends Phaser.Scene {
 
   // ---------- rendering ----------
 
-  updateCamera() {
+  updateCamera(dt) {
     const cam = this.cameras.main;
     const p = this.player;
-    const targetX = p.x + p.w / 2 - cam.width / 2;
-    const targetY = p.y + p.h / 2 - cam.height / 2;
-    cam.scrollX = Phaser.Math.Clamp(targetX, 0, Math.max(0, WORLD_WIDTH - cam.width));
-    cam.scrollY = Phaser.Math.Clamp(targetY, 0, Math.max(0, WORLD_HEIGHT - cam.height));
+    const targetX = Phaser.Math.Clamp(
+      p.x + p.w / 2 - cam.width / 2, 0, Math.max(0, WORLD_WIDTH - cam.width));
+    const targetY = Phaser.Math.Clamp(
+      p.y + p.h / 2 - cam.height / 2, 0, Math.max(0, WORLD_HEIGHT - cam.height));
+
+    if (!this.cameraReady
+      || Math.hypot(targetX - cam.scrollX, targetY - cam.scrollY) > CAMERA_SNAP_DISTANCE) {
+      cam.scrollX = targetX;
+      cam.scrollY = targetY;
+      this.cameraReady = true;
+      return;
+    }
+
+    // Exponential smoothing is frame-rate independent: the camera covers the same
+    // fraction of the remaining distance per unit of time at 30, 60 or 144 fps.
+    const t = 1 - Math.exp(-CAMERA_RESPONSE * dt);
+    cam.scrollX += (targetX - cam.scrollX) * t;
+    cam.scrollY += (targetY - cam.scrollY) * t;
   }
 
   renderGrid() {
@@ -3137,21 +3208,67 @@ class SandScene extends Phaser.Scene {
     }
   }
 
+  remoteBodyPos(id) {
+    const rp = this.remotePlayers[id];
+    const rr = this.remoteRender && this.remoteRender[id];
+    if (rr && rr.samples && rr.samples.length) return { x: rr.x, y: rr.y };
+    return { x: rp.x, y: rp.y };
+  }
+
+  updateRemoteSamples(rr, rp, now) {
+    const x = Number.isFinite(rp.x) ? rp.x : rr.x;
+    const y = Number.isFinite(rp.y) ? rp.y : rr.y;
+    if (!rr.samples) rr.samples = [];
+    if (rr.samples.length && rr.targetX === x && rr.targetY === y) return;
+
+    const last = rr.samples[rr.samples.length - 1];
+    if (last && Math.hypot(x - last.x, y - last.y) > REMOTE_SNAP_DISTANCE) {
+      // Respawn or teleport: do not drag the body across the map.
+      rr.samples.length = 0;
+      if (Number.isFinite(rp.rotation)) rr.rotation = rp.rotation;
+    }
+    rr.samples.push({ x, y, at: now });
+    rr.targetX = x;
+    rr.targetY = y;
+    while (rr.samples.length > REMOTE_SAMPLE_LIMIT) rr.samples.shift();
+  }
+
+  remoteRenderPosition(rr, now) {
+    const samples = rr.samples;
+    if (!samples || !samples.length) return { x: rr.x, y: rr.y };
+    const at = now - REMOTE_INTERP_DELAY_MS;
+    if (at <= samples[0].at) return { x: samples[0].x, y: samples[0].y };
+    const last = samples[samples.length - 1];
+    if (at >= last.at) return { x: last.x, y: last.y };
+    for (let i = 1; i < samples.length; i++) {
+      const a = samples[i - 1], b = samples[i];
+      if (at <= b.at) {
+        const span = b.at - a.at;
+        const t = span > 0 ? (at - a.at) / span : 1;
+        return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+      }
+    }
+    return { x: last.x, y: last.y };
+  }
+
   drawRemotePlayers(dt) {
     this.remoteGfx.clear();
+    const now = this.time.now;
     for (const id in this.remotePlayers) {
       if (id === this.netId) continue;
       const rp = this.remotePlayers[id];
       if (!this.remoteRender[id]) this.remoteRender[id] = {
-        x: rp.x, y: rp.y, vx: 0, vy: 0, rotation: rp.rotation || 0, anim: {},
+        x: rp.x, y: rp.y, vx: 0, vy: 0, rotation: rp.rotation || 0, anim: {}, samples: [],
       };
       const rr = this.remoteRender[id];
+      this.updateRemoteSamples(rr, rp, now);
       const px = rr.x, py = rr.y;
-      rr.x += (rp.x - rr.x) * 0.35;
-      rr.y += (rp.y - rr.y) * 0.35;
+      const pos = this.remoteRenderPosition(rr, now);
+      rr.x = pos.x;
+      rr.y = pos.y;
       if (Number.isFinite(rp.rotation)) {
         const deltaRotation = ((rp.rotation - rr.rotation + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
-        rr.rotation += deltaRotation * Math.min(1, dt * 10);
+        rr.rotation += deltaRotation * (1 - Math.exp(-14 * dt));
       }
 
       // Remote bodies animate off their interpolated motion. The network carries no
@@ -3217,9 +3334,12 @@ class SandScene extends Phaser.Scene {
 
     let socket;
     try {
-      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-      socket = new WebSocket(`${proto}://${location.hostname}:8080`);
+      const url = GameNet.socketUrl();
+      if (!url) throw new Error('No multiplayer server URL');
+      socket = new WebSocket(url);
     } catch (e) {
+      this.netError = 'No usable multiplayer server URL.';
+      this.awaitingServer = false;
       return;
     }
     this.adoptSocket(socket);
@@ -3237,13 +3357,26 @@ class SandScene extends Phaser.Scene {
       this.handleNetMessage(msg);
     };
     socket.onclose = () => {
-      if (this.multiplayer) this.remotePlayers = {};
+      const wasConnected = this.multiplayer;
+      if (wasConnected) this.remotePlayers = {};
       this.multiplayer = false;
-      // A server that never answered (or went away) should not leave the player
-      // staring at a frozen world — fall back to simulating locally.
-      this.awaitingServer = false;
+      if (wasConnected) {
+        // The server world and ours only match while the socket is alive. If we
+        // silently switched to local simulation after a drop, the room would keep
+        // running on the server while this client diverged from it. Freeze instead
+        // and tell the player to rejoin.
+        this.netDisconnected = true;
+        this.awaitingServer = true;
+        this.netError = 'Disconnected from the room server. Press Esc and rejoin.';
+      } else {
+        // Never reached a room: fall back to solo rather than freezing at boot.
+        this.netDisconnected = false;
+        this.awaitingServer = false;
+      }
     };
-    socket.onerror = () => { this.awaitingServer = false; };
+    socket.onerror = () => {
+      if (!this.multiplayer) this.awaitingServer = false;
+    };
   }
 
   handleNetMessage(msg) {
@@ -3258,11 +3391,14 @@ class SandScene extends Phaser.Scene {
       this.buildBackdrop();
       this.remotePlayers = msg.players || {};
       this.multiplayer = true;
+      this.netDisconnected = false;
+      this.netError = null;
       this.awaitingServer = false;
     } else if (msg.t === 'error') {
       // Most likely the room filled or was reaped between listing and joining.
       this.netError = String(msg.message || 'Server refused the request.');
       this.awaitingServer = false;
+      this.netDisconnected = false;
     } else if (msg.t === 'rooms') {
       // Lobby chatter that arrived after we joined; ignore it.
     } else if (msg.t === 'delta') {
@@ -3339,7 +3475,7 @@ class SandScene extends Phaser.Scene {
     this.movePlayer(dt);
     this.applyEnvironmentDamage(dt);
     Spells.wade(this, dt);
-    this.updateCamera();
+    this.updateCamera(dt);
 
     if (!this.multiplayer && !this.awaitingServer) {
       this.accumulator += scaled;
@@ -3408,6 +3544,7 @@ const config = {
   height: SCREEN_HEIGHT,
   backgroundColor: '#0a0a0f',
   pixelArt: true,
+  roundPixels: true,
   scale: {
     mode: Phaser.Scale.FIT,
     autoCenter: Phaser.Scale.CENTER_BOTH,

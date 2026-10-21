@@ -81,8 +81,9 @@ class MenuScene extends Phaser.Scene {
   connectLobby() {
     let sock;
     try {
-      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-      sock = new WebSocket(`${proto}://${location.hostname}:8080`);
+      const url = GameNet.socketUrl();
+      if (!url) throw new Error('No multiplayer server URL');
+      sock = new WebSocket(url);
     } catch (e) {
       this.lobbyState = 'offline';
       return;
@@ -188,11 +189,44 @@ class MenuScene extends Phaser.Scene {
       case 'singleplayer':
         return {
           title: 'SINGLEPLAYER',
-          sub: 'your own procedurally generated world',
+          sub: 'campaign or a sandbox map',
           items: [
             { label: 'Campaign', sub: 'fight through levels', act: () => this.showScreen('campaign') },
-            { label: 'Free play', sub: 'sandbox — dig, build, and test spells', act: () => this.startGame({ netMode: 'solo' }) },
+            { label: 'Free play', sub: 'sandbox — choose a map', act: () => this.showScreen('freeplay') },
             { label: 'Back', sub: '', act: () => this.showScreen('main') },
+          ],
+        };
+      case 'freeplay':
+        return {
+          title: 'FREE PLAY',
+          sub: 'choose a map',
+          items: [
+            {
+              label: 'Town',
+              sub: 'procedural town and wilderness — the original map',
+              act: () => this.startGame({ netMode: 'solo', map: 'town' }),
+            },
+            {
+              label: 'Agni Kai Arena',
+              sub: 'fire nation duelling ground under a burning sky',
+              act: () => this.startGame({ netMode: 'solo', map: 'arena' }),
+            },
+            {
+              label: 'Sky Temple',
+              sub: 'terraced mountain temples, pagodas and timber bridges',
+              act: () => this.startGame({ netMode: 'solo', map: 'sky' }),
+            },
+            {
+              label: 'Frozen North',
+              sub: 'aurora, snowfields, a frozen lake and an ice palace',
+              act: () => this.startGame({ netMode: 'solo', map: 'north' }),
+            },
+            {
+              label: 'Volcanic Caldera',
+              sub: 'lava lake, bridge and fire nation foundries',
+              act: () => this.startGame({ netMode: 'solo', map: 'caldera' }),
+            },
+            { label: 'Back', sub: '', act: () => this.showScreen('singleplayer') },
           ],
         };
       case 'campaign':
@@ -456,7 +490,12 @@ class MenuScene extends Phaser.Scene {
     if (key === 'Enter' || key === ' ') { this.activate(this.sel); return; }
     if (key === 'Escape') {
       if (this.screen === 'main') return;
-      this.showScreen(this.screen === 'singleplayer' || this.screen === 'multiplayer' ? 'main' : 'multiplayer');
+      const parents = {
+        singleplayer: 'main', multiplayer: 'main', exit: 'main',
+        campaign: 'singleplayer', freeplay: 'singleplayer',
+        browse: 'multiplayer', join: 'multiplayer', create: 'multiplayer',
+      };
+      this.showScreen(parents[this.screen] || 'main');
     }
   }
 

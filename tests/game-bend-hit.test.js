@@ -30,6 +30,7 @@ const Spells = {
 };
 const { SandScene } = vm.runInNewContext(source + '\n({ SandScene })', {
   PixelWorld, Phaser, MenuScene: class {}, window: {},
+  atob: (b64) => Buffer.from(b64, 'base64').toString('binary'),
   CHAR_SCALE: 2, PLAYER_BOX: { w: 20, h: 32 },
   GameAudio: { hurt() {}, death() {}, cast() {} }, Spells,
 });
@@ -461,4 +462,184 @@ test('B toggles digging without cycling the selected element', () => {
   s.handleSpellKeys();
   assert.equal(s.leftClickMode, 'bend');
   assert.equal(s.bendElement, 'Fire');
+});
+
+test('deltas from the server write matching cells locally', () => {
+  const s = scene();
+  s.grid = new Uint8Array(PixelWorld.COLS * PixelWorld.ROWS);
+  s.life = new Uint8Array(PixelWorld.COLS * PixelWorld.ROWS);
+  s.handleNetMessage({ t: 'delta', cells: [[42, PixelWorld.MAT.WATER, 7], [43, PixelWorld.MAT.FIRE, 12]] });
+  assert.equal(s.grid[42], PixelWorld.MAT.WATER);
+  assert.equal(s.life[42], 7);
+  assert.equal(s.grid[43], PixelWorld.MAT.FIRE);
+  assert.equal(s.life[43], 12);
+});
+
+test('leaving a room removes the remote player and their fall-impact cooldown', () => {
+  const s = scene();
+  s.remotePlayers = { 2: { x: 1, y: 2 }, 3: { x: 3, y: 4 } };
+  s.remoteFallImpactAt = new Map([['remote:2', 999]]);
+  s.handleNetMessage({ t: 'leave', id: '2' });
+  assert.equal(s.remotePlayers[2], undefined);
+  assert.ok(s.remotePlayers[3]);
+  assert.equal(s.remoteFallImpactAt.has('remote:2'), false);
+});
+
+test('a dropped multiplayer socket freezes the server world instead of simulating it locally', () => {
+  const s = scene();
+  s.netMode = 'multi';
+  s.multiplayer = true;
+  s.awaitingServer = false;
+  s.remotePlayers = { 2: { x: 1, y: 2 } };
+  const socket = {};
+  s.adoptSocket(socket);
+  socket.onclose();
+
+  assert.equal(s.multiplayer, false);
+  assert.equal(s.netDisconnected, true);
+  assert.equal(s.awaitingServer, true, 'must not start a divergent local simulation');
+  assert.equal(Object.keys(s.remotePlayers).length, 0);
+  assert.match(s.netError, /Disconnected/);
+});
+
+test('a failed initial connection falls back to solo instead of freezing at boot', () => {
+  const s = scene();
+  s.netMode = 'multi';
+  s.multiplayer = false;
+  s.awaitingServer = true;
+  const socket = {};
+  s.adoptSocket(socket);
+  socket.onclose();
+
+  assert.equal(s.multiplayer, false);
+  assert.equal(s.netDisconnected, false);
+  assert.equal(s.awaitingServer, false);
+});
+
+test('joined resets disconnect and error state', () => {
+  const s = scene();
+  s.grid = new Uint8Array(PixelWorld.COLS * PixelWorld.ROWS);
+  s.life = new Uint8Array(PixelWorld.COLS * PixelWorld.ROWS);
+  s.world = { bg: new Uint8Array(PixelWorld.COLS * PixelWorld.ROWS) };
+  s.buildBackdrop = () => {};
+  s.netError = 'old';
+  s.netDisconnected = true;
+  s.handleNetMessage({
+    t: 'joined', id: '9', color: 1, roomId: 'ABCD', roomName: 'Room',
+    grid: Buffer.from(new Uint8Array(PixelWorld.COLS * PixelWorld.ROWS)).toString('base64'),
+    life: Buffer.from(new Uint8Array(PixelWorld.COLS * PixelWorld.ROWS)).toString('base64'),
+    bg: Buffer.from(new Uint8Array(PixelWorld.COLS * PixelWorld.ROWS)).toString('base64'),
+    players: {},
+  });
+  assert.equal(s.netId, '9');
+  assert.equal(s.netError, null);
+  assert.equal(s.netDisconnected, false);
+  assert.equal(s.multiplayer, true);
+  assert.equal(s.awaitingServer, false);
+});
+
+test('horizontal movement eases in and out instead of snapping to top speed', () => {
+  const s = scene();
+  s.rectSolid = () => false;
+  s.player.grounded = true;
+  s.keys.right = { isDown: true };
+
+  s.movePlayer(0.016);
+  assert.ok(s.player.vx > 0 && s.player.vx < 90, `first frame velocity ${s.player.vx}`);
+  assert.ok(s.player.x > 50 && s.player.x < 50 + 90 * 0.016);
+
+  for (let i = 0; i < 12; i++) s.movePlayer(0.016);
+  assert.equal(s.player.vx, 90);
+
+  s.keys.right = { isDown: false };
+  s.movePlayer(0.016);
+  assert.ok(s.player.vx > 0 && s.player.vx < 90);
+  for (let i = 0; i < 30; i++) s.movePlayer(0.016);
+  assert.equal(s.player.vx, 0);
+});
+
+test('pressing into a wall stops horizontal velocity instead of running in place', () => {
+  const s = scene();
+  s.player.grounded = true;
+  s.keys.right = { isDown: true };
+  s.rectSolid = () => true;
+  s.movePlayer(0.016);
+  assert.equal(s.player.vx, 0);
+});
+
+test('camera eases toward the player and snaps on a large jump', () => {
+  const s = scene();
+  s.player.x = 500;
+  s.player.y = 300;
+  const cam = { width: 200, height: 120, scrollX: 0, scrollY: 0 };
+  s.cameras = { main: cam };
+  s.cameraReady = false;
+
+  s.updateCamera(0.016);
+  assert.equal(cam.scrollX, 410);
+  assert.equal(cam.scrollY, 256);
+
+  s.player.x = 510;
+  s.updateCamera(0.016);
+  assert.ok(cam.scrollX > 410 && cam.scrollX < 420);
+
+  s.player.x = 1510;
+  s.updateCamera(0.016);
+  assert.equal(cam.scrollX, 1420);
+});
+
+test('remote players interpolate between network snapshots at a fixed delay', () => {
+  const s = scene();
+  const rr = { x: 0, y: 0, vx: 0, vy: 0, rotation: 0, anim: {}, samples: [] };
+
+  s.updateRemoteSamples(rr, { x: 0, y: 0 }, 1000);
+  assert.equal(s.remoteRenderPosition(rr, 1000).x, 0);
+
+  s.updateRemoteSamples(rr, { x: 50, y: 0 }, 1050);
+  assert.equal(s.remoteRenderPosition(rr, 1080).x, 0, 'still inside the interpolation delay');
+  assert.equal(s.remoteRenderPosition(rr, 1115).x, 25, 'halfway between two snapshots');
+  assert.equal(s.remoteRenderPosition(rr, 1200).x, 50, 'holds the latest snapshot');
+});
+
+test('a remote respawn snaps instead of dragging the body across the map', () => {
+  const s = scene();
+  const rr = { x: 0, y: 0, vx: 0, vy: 0, rotation: 0, anim: {}, samples: [] };
+  s.updateRemoteSamples(rr, { x: 0, y: 0 }, 1000);
+  s.updateRemoteSamples(rr, { x: 1000, y: 0 }, 1050);
+  assert.equal(rr.samples.length, 1);
+  assert.equal(s.remoteRenderPosition(rr, 1050).x, 1000);
+});
+
+test('remote hit tests follow the interpolated position that is actually drawn', () => {
+  const s = scene();
+  s.netId = 'self';
+  s.remotePlayers = { other: { x: 100, y: 100 } };
+  s.remoteRender = { other: { x: 12, y: 34, samples: [{ x: 12, y: 34, at: 0 }] } };
+  const drawn = s.remoteBodyPos('other');
+  assert.equal(drawn.x, 12);
+  assert.equal(drawn.y, 34);
+
+  s.remoteRender = {};
+  const raw = s.remoteBodyPos('other');
+  assert.equal(raw.x, 100);
+  assert.equal(raw.y, 100);
+});
+
+test('free play defaults to Town and accepts the arena map', () => {
+  const s = new SandScene();
+  s.init({ netMode: 'solo' });
+  assert.equal(s.map, 'town');
+  s.init({ netMode: 'solo', map: 'arena' });
+  assert.equal(s.map, 'arena');
+});
+
+test('free play accepts every map id and rejects unknown ones', () => {
+  for (const map of ['arena', 'sky', 'north', 'caldera']) {
+    const s = new SandScene();
+    s.init({ netMode: 'solo', map });
+    assert.equal(s.map, map);
+  }
+  const fallback = new SandScene();
+  fallback.init({ netMode: 'solo', map: 'not-a-map' });
+  assert.equal(fallback.map, 'town');
 });
