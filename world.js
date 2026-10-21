@@ -34,8 +34,8 @@
   const FIRE_LIFE = 45;
   const SMOKE_LIFE = 70;
   // Spell ice is solid and standable but temporary — it thaws back into the water it
-  // came from. (setCell caps life at 255, so in practice this is 255 ticks.)
-  const ICE_LIFE = 340;
+  // came from. `life` is a byte, so this tops out at 255 ticks.
+  const ICE_LIFE = 255;
 
   // Fire, smoke and spell ice use a cell's `life` byte as a countdown. Every other
   // material uses it as a palette variant, so generated structures keep their

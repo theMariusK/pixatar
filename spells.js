@@ -562,7 +562,7 @@ function discOffsets(r) {
 }
 
 // The local player's reserve lives on the scene; an enemy carries its own, starting
-// full, so a Tidewisp gets a few casts before it depends on standing near water.
+// full, so a Tide Mystic gets a few casts before it depends on standing near water.
 function reserveOf(s, ctx) {
   const holder = (ctx && ctx.caster) || s;
   if (!holder.reserve) holder.reserve = { water: WATER_RESERVE_CAP };

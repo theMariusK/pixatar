@@ -7,10 +7,10 @@
 const { WebSocketServer } = require('ws');
 const PixelWorld = require('./world');
 
-const { COLS, ROWS, MAT, MAT_COUNT, FIRE_LIFE, SMOKE_LIFE, ICE_LIFE, IS_RIGID, FLAMMABILITY, DEFAULT_BODY_SCALE } = PixelWorld;
+const { COLS, ROWS, MAT, MAT_COUNT, DEFAULT_BODY_SCALE } = PixelWorld;
 const PLAYER_BODY_W = 10 * DEFAULT_BODY_SCALE;
 const PLAYER_BODY_H = 16 * DEFAULT_BODY_SCALE;
-const { EMPTY, SAND, WATER, STONE, WOOD, FIRE, SMOKE, BEDROCK, LAVA, ACID, GAS, ICE, GRASS, SNOW, OIL } = MAT;
+const { BEDROCK } = MAT;
 
 // Each room owns an independent world. The helpers below read and write `W`, the
 // world currently being handled, so they stay written once and simply run once
@@ -26,76 +26,8 @@ const PIXEL = 3;
 const WORLD_PX_W = COLS * PIXEL;
 const WORLD_PX_H = ROWS * PIXEL;
 
-function idx(x, y) {
-  return y * COLS + x;
-}
-
 function setCell(id, mat, customLife) {
   W.setCell(id, mat, customLife);
-}
-
-function digCircle(gx, gy, r) {
-  for (let dy = -r; dy <= r; dy++) {
-    for (let dx = -r; dx <= r; dx++) {
-      if (dx * dx + dy * dy > r * r) continue;
-      const x = gx + dx, y = gy + dy;
-      if (x <= 0 || x >= COLS - 1 || y <= 0 || y >= ROWS - 1) continue;
-      const id = idx(x, y);
-      if (W.grid[id] === BEDROCK) continue;
-      setCell(id, EMPTY);
-    }
-  }
-}
-
-function explode(gx, gy, r) {
-  const outer = r + Math.round(r * 0.4) + 2;
-  for (let dy = -outer; dy <= outer; dy++) {
-    for (let dx = -outer; dx <= outer; dx++) {
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      if (dist > outer) continue;
-      const x = gx + dx, y = gy + dy;
-      if (x <= 0 || x >= COLS - 1 || y <= 0 || y >= ROWS - 1) continue;
-      const id = idx(x, y);
-      if (W.grid[id] === BEDROCK) continue;
-      if (dist <= r) {
-        const rim = dist / r;
-        const fireChance = 0.2 + rim * 0.6;
-        if (Math.random() < fireChance) setCell(id, FIRE, FIRE_LIFE * 2.2);
-        else setCell(id, EMPTY);
-      } else {
-        const t = (dist - r) / (outer - r);
-        if (Math.random() < 0.6 * (1 - t)) setCell(id, FIRE, FIRE_LIFE * 1.6);
-      }
-    }
-  }
-}
-
-// Materials a client is allowed to place. STONE was missing here while the client
-// offered it on the number keys, so stone placed in multiplayer existed only on the
-// placer's machine forever — the server silently dropped it and never sent a delta
-// to correct it. ICE is the spell system's frozen water and must be here too.
-const PLACEABLE = new Set([SAND, WATER, FIRE, WOOD, LAVA, ACID, GAS, STONE, ICE, OIL, SNOW]);
-
-function placeCircle(gx, gy, r, mat, life) {
-  if (!PLACEABLE.has(mat)) return;
-  for (let dy = -r; dy <= r; dy++) {
-    for (let dx = -r; dx <= r; dx++) {
-      if (dx * dx + dy * dy > r * r) continue;
-      const x = gx + dx, y = gy + dy;
-      if (x <= 0 || x >= COLS - 1 || y <= 0 || y >= ROWS - 1) continue;
-      const id = idx(x, y);
-      const cur = W.grid[id];
-      if (mat === FIRE) {
-        if (cur === EMPTY || (FLAMMABILITY[cur] > 0 && cur !== GRASS)) setCell(id, FIRE, life);
-      } else if (mat === ICE) {
-        // Ice forms over water as well as empty space: freezing a pool solid is the
-        // whole point of an ice wall.
-        if (cur === EMPTY || cur === WATER) setCell(id, ICE, life || ICE_LIFE);
-      } else if (cur === EMPTY) {
-        setCell(id, mat, life);
-      }
-    }
-  }
 }
 
 // A client's computed cell writes, applied verbatim. Bounded per message and
@@ -117,38 +49,6 @@ function applyCells(cells) {
     // never need to create it: it only exists as the world border.
     if (mat === BEDROCK || W.grid[id] === BEDROCK) continue;
     setCell(id, mat, lifeVal);
-  }
-}
-
-// Water spells extinguish rather than burn. Mirrors the client's douseCell exactly,
-// so a flood looks the same for everyone.
-function douseCircle(gx, gy, r) {
-  for (let dy = -r; dy <= r; dy++) {
-    for (let dx = -r; dx <= r; dx++) {
-      if (dx * dx + dy * dy > r * r) continue;
-      const x = gx + dx, y = gy + dy;
-      if (x <= 0 || x >= COLS - 1 || y <= 0 || y >= ROWS - 1) continue;
-      const id = idx(x, y);
-      const m = W.grid[id];
-      if (m === FIRE) setCell(id, SMOKE, SMOKE_LIFE);
-      else if (m === LAVA) setCell(id, STONE);
-      else if (m === EMPTY) setCell(id, WATER);
-    }
-  }
-}
-
-// Earth spells bring down terrain that was already barely holding on. Uses the same
-// support map the periodic collapse pass maintains.
-function shockCircle(gx, gy, r) {
-  for (let dy = -r; dy <= r; dy++) {
-    for (let dx = -r; dx <= r; dx++) {
-      if (dx * dx + dy * dy > r * r) continue;
-      const x = gx + dx, y = gy + dy;
-      if (x <= 0 || x >= COLS - 1 || y <= 0 || y >= ROWS - 1) continue;
-      const id = idx(x, y);
-      const m = W.grid[id];
-      if (IS_RIGID[m] && !W.visited[id]) W.falling[id] = 1;
-    }
   }
 }
 
@@ -412,16 +312,6 @@ function handleConnection(ws) {
       p.burning = msg.burning === true;
       const rotation = +msg.rotation;
       p.rotation = Number.isFinite(rotation) ? Math.max(-Math.PI * 8, Math.min(Math.PI * 8, rotation)) : 0;
-    } else if (msg.t === 'dig') {
-      digCircle(msg.gx | 0, msg.gy | 0, Math.min(Math.max(msg.r | 0, 1), 12));
-    } else if (msg.t === 'place') {
-      placeCircle(msg.gx | 0, msg.gy | 0, Math.min(Math.max(msg.r | 0, 1), 12), msg.mat | 0, msg.life | 0 || undefined);
-    } else if (msg.t === 'explode') {
-      explode(msg.gx | 0, msg.gy | 0, Math.min(Math.max(msg.r | 0, 1), 40));
-    } else if (msg.t === 'douse') {
-      douseCircle(msg.gx | 0, msg.gy | 0, Math.min(Math.max(msg.r | 0, 1), 14));
-    } else if (msg.t === 'shock') {
-      shockCircle(msg.gx | 0, msg.gy | 0, Math.min(Math.max(msg.r | 0, 1), 16));
     } else if (msg.t === 'cells') {
       // Explicit cell writes from a casting client. The caster has already computed
       // the exact result locally; applying the same values here is what keeps every
@@ -476,19 +366,12 @@ function handleConnection(ws) {
         tx: +msg.tx || 0, ty: +msg.ty || 0,
         r: Math.min(Math.max(msg.r | 0, 1), 40),
       }, ws.playerId);
-    } else if (msg.t === 'settle') {
-      const gx = msg.gx | 0, gy = msg.gy | 0, mat = msg.mat | 0;
-      if (gx > 0 && gx < COLS - 1 && gy > 0 && gy < ROWS - 1
-        && (mat === SAND || mat === ICE || IS_RIGID[mat])) {
-        const cellId = idx(gx, gy);
-        if (W.grid[cellId] !== BEDROCK) setCell(cellId, mat);
-      }
     }
   });
 
   ws.on('close', () => {
-    lobbyClients.delete(ws);
     leaveRoom(ws);
+    lobbyClients.delete(ws);
     logger(`player ${ws.playerId} disconnected`);
   });
 }

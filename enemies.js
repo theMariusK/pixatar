@@ -14,32 +14,32 @@
 // differently; the element is what makes them LOOK different.
 const ENEMY_ARCHETYPES = [
   {
-    name: 'Emberling', element: 'Fire', color: 0xff7a45,
+    name: 'Cinder Guard', element: 'Fire', color: 0xff7a45,
     health: 55, speed: 62, aggro: 360, castRange: 240, cooldown: 2.1, spellSpeed: 1.0,
     forms: ['Bolt', 'Bolt', 'Nova'], modifiers: [null, null, 'Chain', 'Split'],
   },
   {
-    name: 'Pebbleback', element: 'Earth', color: 0xa8845a,
+    name: 'Stone Warden', element: 'Earth', color: 0xa8845a,
     health: 110, speed: 38, aggro: 300, castRange: 170, cooldown: 2.8, spellSpeed: 0.8,
     forms: ['Bolt', 'Ground'], modifiers: [null, 'Amplify', 'Split'],
   },
   {
-    name: 'Sparkling', element: 'Lightning', color: 0xc9a6ff,
+    name: 'Storm Adept', element: 'Lightning', color: 0xc9a6ff,
     health: 45, speed: 88, aggro: 400, castRange: 260, cooldown: 1.5, spellSpeed: 0.9,
     forms: ['Bolt', 'Homing'], modifiers: [null, 'Split', 'Pierce'],
   },
   {
-    name: 'Tidewisp', element: 'Water', color: 0x63b8ff,
+    name: 'Tide Mystic', element: 'Water', color: 0x63b8ff,
     health: 70, speed: 54, aggro: 320, castRange: 200, cooldown: 2.4, spellSpeed: 0.85,
     forms: ['Bolt', 'Trail'], modifiers: [null, 'Split'],
   },
   {
-    name: 'Shade', element: 'Dark', color: 0x9a5ae0,
+    name: 'Dusk Stalker', element: 'Dark', color: 0x9a5ae0,
     health: 65, speed: 70, aggro: 380, castRange: 230, cooldown: 2.6, spellSpeed: 0.95,
     forms: ['Bolt', 'Nova'], modifiers: [null, 'Chain', 'Delay'],
   },
   {
-    name: 'Riftling', element: 'Arcane', color: 0x8fe8ff,
+    name: 'Spirit Mask', element: 'Arcane', color: 0x8fe8ff,
     health: 50, speed: 66, aggro: 340, castRange: 250, cooldown: 2.0, spellSpeed: 1.0,
     forms: ['Bolt', 'Beam'], modifiers: [null, 'Pierce', 'Split'],
   },
@@ -49,9 +49,9 @@ class EnemySystem {
   constructor(scene) {
     this.scene = scene;
     this.list = [];
-    // Sits between debris (8) and the player (10): enemies are world objects, but the
-    // player should never be hidden behind one.
-    this.gfx = scene.add.graphics().setDepth(9);
+    // Sits between debris (8) and the player (10), above remote players (9): enemies
+    // are world objects, but the player should never be hidden behind one.
+    this.gfx = scene.add.graphics().setDepth(9.5);
     this.killCount = 0;
     this.spawnedTotal = 0;
   }
@@ -319,13 +319,13 @@ class EnemySystem {
       // holds the second frame: the creature tenses, then throws.
       const pace = 0.26 / (1 + Math.abs(e.vx) / 44);
       e.animT = ((e.animT || 0) + dt) % pace;
-      const frames = Sprites.ENEMY_FRAMES[arch.name] || Sprites.ENEMY_FRAMES.Emberling;
+      const frames = Sprites.ENEMY_FRAMES[arch.name] || Sprites.ENEMY_FRAMES['Cinder Guard'];
       const frame = e.castFlash > 0 ? frames[1] : frames[(e.animT / pace) < 0.5 ? 0 : 1];
 
       // The eyes are lit by the element the creature casts, which is the only tell
       // you get at a distance before the first spell leaves its hands.
       const eyePal = FX_PALETTE[arch.element];
-      let pal = Sprites.creaturePalette(arch.color, eyePal ? eyePal.core : 0xf6faff);
+      let pal = Sprites.enemyPalette(arch.color, eyePal ? eyePal.core : 0xf6faff);
       if (e.castFlash > 0) pal = Sprites.tintPalette(pal, 0xffffff, Math.min(0.75, e.castFlash * 2.4));
       if (flash) pal = Sprites.tintPalette(pal, 0xffffff, 0.8);
 

@@ -182,33 +182,47 @@ function drawSprite(g, frame, x, y, palette, opts = {}) {
 
 // ---------- palettes ----------
 
-// `tint` drives every cloth pixel, which is what makes one player distinguishable
-// from another in multiplayer and what gives each enemy archetype its element colour.
-// Skin, eyes and leather stay fixed so a red player still looks like a person.
+// `tint` drives every outer-cloth pixel, which is what makes one player distinguishable
+// from another in multiplayer. Skin, trim, wraps and boots stay fixed so a red player
+// still looks like the same person in a different tunic. `glow` lights the arrow
+// tattoo and the casting hand together, so the bender visibly "powers up" with the
+// element they are about to cast.
 function robePalette(tint, glow) {
+  const g = glow ?? 0xffe9a8;
   return {
     r: tint,
     R: _mix(tint, 0x14121c, 0.48),
     l: _mix(tint, 0xffffff, 0.38),
+    y: 0xf0bf4a,
+    Y: 0xb07a2a,
     s: 0xe8b48c,
     S: 0xa9765a,
-    w: 0xf2f4ff,
+    t: _mix(0x6fd0ff, g, 0.3),
     e: 0x18141f,
-    m: 0x4a3a28,
-    M: 0xc9b271,
+    m: 0x6b4a34,
+    p: _mix(tint, 0x14121c, 0.3),
     k: 0x2b2736,
-    g: glow ?? 0xffe9a8,
+    g,
   };
 }
 
-function creaturePalette(tint, glow) {
+// Enemy palettes are built from the archetype's own colour, so each element reads at a
+// glance: red armour, green stone-coloured robes, parka blues and so on. Gold trim,
+// skin and the dark armour/hair stay fixed. `glow` is the element's FX colour and lights
+// the eyes and the casting hand — the only tell you get at range before a spell leaves.
+function enemyPalette(tint, glow) {
   return {
     r: tint,
     R: _mix(tint, 0x14121c, 0.5),
     l: _mix(tint, 0xffffff, 0.42),
-    w: glow ?? 0xf6faff,
-    k: _mix(tint, 0x14121c, 0.72),
+    a: 0xe0b84e,
+    f: 0xeef4fa,
+    s: 0xe0aa84,
+    S: 0xa06e54,
+    k: _mix(tint, 0x14121c, 0.76),
+    h: 0x2b2230,
     e: 0x18141f,
+    w: glow ?? 0xf6faff,
   };
 }
 
@@ -223,523 +237,295 @@ function tintPalette(base, colour, amount) {
 
 // ---------- player art ----------
 //
-// 10 wide, 16 tall, facing right. A hooded-hat silhouette with a beard: at this size
-// the only things that survive are the outline and one strong shape, and a pointed
-// hat leaning back reads as "caster" from across the screen at a glance.
+// 10 wide, 16 tall, facing right. A bald airbender-style monk: a round head with the
+// glowing arrow tattoo, a short outer tunic over yellow under-sleeves, a wide sash, and
+// baggy trousers tucked into boots. At this size the identity lives in three things —
+// the blue arrow on a bare head, the yellow sash against the tunic, and the wrapped
+// forearm — so those are what every frame keeps.
 //
-//   r/R/l  robe, its shade and its highlight (tinted per player)
-//   s/S    skin and skin shadow      w  beard and eye white
-//   e      pupil                     m/M  belt leather and buckle
-//   k      boots                     g  spell glow at the casting hand
+// Frames are assembled from a head, a torso and a pair of legs rather than drawn out
+// whole: the head never changes between clips except for the eye, and sharing it
+// guarantees the face cannot drift from one frame to the next.
+//
+//   r/R/l  outer tunic, its shade and its highlight (tinted per player)
+//   y/Y    under-sleeves and sash         s/S  skin and skin shadow
+//   t      arrow tattoo (lit by the cast) e    eye           g  spell glow at the hand
+//   m      wrist wrap                     p    trousers      k  boots
+
+// Rows are stacked top to bottom: 6 head + 7 torso + 3 legs = 16.
+const _stack = (...parts) => [].concat(...parts);
+
+// Leans a block of rows one pixel forward. Every row has to end in a transparent pixel.
+const _lean = (rows) => rows.map((r) => `.${r.slice(0, -1)}`);
+
+const _HEAD = [
+  '...ssss...',
+  '..ssstts..',
+  '..ssssts..',
+  '..Ssssses.',
+  '..sssssss.',
+  '....SSSS..',
+];
+const _eye = (head, c) => head.map((r) => r.replace('e', c));
+const _HEAD_CAST = _eye(_HEAD, 'g');
+const _HEAD_SHUT = _eye(_HEAD, 'S');
+
+const _TORSO_A = [
+  '.rrryyrr..',
+  '.rrrryrry.',
+  '.rrrryrry.',
+  '.yyyyyyyY.',
+  '.rrrrrrrs.',
+  '.rrrrrrr..',
+  '.RRRRRRR..',
+];
+const _TORSO_B = [
+  '.rrryyrr..',
+  '.rrrryrry.',
+  '.rrrryrry.',
+  '.yyyyyyyY.',
+  '.rrrrrrry.',
+  '.rrrrrrrs.',
+  '.RRRRRRR..',
+];
+const _TORSO_CAST_A = [
+  '.rrryyrr..',
+  '.rrrryrry.',
+  '.rrrryyysg',
+  '.yyyyyyyY.',
+  '.rrrrrrr..',
+  '.rrrrrrr..',
+  '.RRRRRRR..',
+];
+const _TORSO_CAST_B = [
+  '.rrryyrr..',
+  '.rrrryrrsg',
+  '.rrrryyysg',
+  '.yyyyyyyY.',
+  '.rrrrrrr..',
+  '.rrrrrrr..',
+  '.RRRRRRR..',
+];
+const _TORSO_JUMP = [
+  '.rrryyrrs.',
+  '.rrrryrry.',
+  '.rrrryrr..',
+  '.yyyyyyY..',
+  '.rrrrrr...',
+  '.rrrrrr...',
+  '..RRRRR...',
+];
+const _TORSO_FALL = [
+  '.rrryyrr..',
+  'srrrryrrs.',
+  '.rrrryrrr.',
+  '.yyyyyyyY.',
+  'rrrrrrrrr.',
+  '.rrrrrrrr.',
+  '.RRRRRRRR.',
+];
+const _TORSO_SWIM_A = [
+  '.rrryyrr..',
+  '.rrrryrr..',
+  'syrrryrrys',
+  '.yyyyyyyY.',
+  '.rrrrrrr..',
+  '.rrrrrrr..',
+  '.RRRRRRR..',
+];
+const _TORSO_SWIM_B = [
+  '.rrryyrr..',
+  '.rrrryrr..',
+  '.rrrryrrys',
+  'syyyyyyyY.',
+  '.rrrrrrr..',
+  '.rrrrrrr..',
+  '.RRRRRRR..',
+];
+const _TORSO_HURT = [
+  '.rrryyrr.s',
+  '.rrrryrry.',
+  'syrrryrry.',
+  '.yyyyyyyY.',
+  '.rrrrrrr..',
+  '.rrrrrrr..',
+  '.RRRRRRR..',
+];
+
+const _LEGS_STAND = ['..pp.pp...', '..pp.pp...', '.kkk.kkk..'];
+const _LEGS_RUN_A = ['..pp..pp..', '.pp....pp.', 'kkk....kkk'];
+const _LEGS_RUN_B = ['..pp.pp...', '...pppp...', '...kk.kk..'];
+const _LEGS_RUN_C = ['..pp..pp..', '.pp..pp...', 'kkk..kkk..'];
+const _LEGS_RUN_D = ['..pp.pp...', '..ppp.pp..', '..kk..kk..'];
 
 const PLAYER_FRAMES = compileSet({
   idle: [
-    [
-      '..ll......',
-      '..lll.....',
-      '..lrrr....',
-      '.rrrrrr...',
-      'rrrrrrrr..',
-      '.RRRRRR...',
-      '..ssswe...',
-      '..swwwS...',
-      '...www....',
-      '..rrwrr...',
-      '.rrrwrrs..',
-      '.rmmmmrs..',
-      '.rrrrrrr..',
-      '.RRRRRRR..',
-      '..kk.kk...',
-      '..kk.kk...',
-    ],
-    [
-      '..ll......',
-      '..lll.....',
-      '..lrrr....',
-      '.rrrrrr...',
-      'rrrrrrrr..',
-      '.RRRRRR...',
-      '..ssswe...',
-      '..swwwS...',
-      '...www....',
-      '..rrwrr...',
-      '.rrrwrr...',
-      '.rmmmmrs..',
-      '.rrrrrrs..',
-      '.RRRRRRR..',
-      '..kk.kk...',
-      '..kk.kk...',
-    ],
+    _stack(_HEAD, _TORSO_A, _LEGS_STAND),
+    _stack(_HEAD, _TORSO_B, _LEGS_STAND),
   ],
 
-  // Four-frame cycle: contact, passing, contact, passing. The head shifts one pixel
-  // forward on the contact frames, which is the whole of the forward lean.
+  // Four-frame cycle: contact, passing, contact, passing. The upper body leans a pixel
+  // forward on every frame, which is the whole of the forward lean.
   run: [
-    [
-      '...ll.....',
-      '...lll....',
-      '...lrrr...',
-      '..rrrrrr..',
-      '.rrrrrrrr.',
-      '..RRRRRR..',
-      '...ssswe..',
-      '...swwwS..',
-      '....www...',
-      '..rrwrr...',
-      '.rrrwrrs..',
-      '.rmmmmrs..',
-      '.rrrrrrr..',
-      '.RRRRRR...',
-      '..kk..kk..',
-      '.kk....kk.',
-    ],
-    [
-      '..ll......',
-      '..lll.....',
-      '..lrrr....',
-      '.rrrrrr...',
-      'rrrrrrrr..',
-      '.RRRRRR...',
-      '..ssswe...',
-      '..swwwS...',
-      '...www....',
-      '..rrwrr...',
-      '.rrrwrr...',
-      '.rmmmmrs..',
-      '.rrrrrrs..',
-      '.RRRRRRR..',
-      '...kkk....',
-      '...kk.k...',
-    ],
-    [
-      '...ll.....',
-      '...lll....',
-      '...lrrr...',
-      '..rrrrrr..',
-      '.rrrrrrrr.',
-      '..RRRRRR..',
-      '...ssswe..',
-      '...swwwS..',
-      '....www...',
-      '..rrwrr...',
-      '.rrrwrr.s.',
-      '.rmmmmr.s.',
-      '.rrrrrrr..',
-      '..RRRRRR..',
-      '.kk..kk...',
-      'kk....kk..',
-    ],
-    [
-      '..ll......',
-      '..lll.....',
-      '..lrrr....',
-      '.rrrrrr...',
-      'rrrrrrrr..',
-      '.RRRRRR...',
-      '..ssswe...',
-      '..swwwS...',
-      '...www....',
-      '..rrwrr...',
-      '.rrrwrrs..',
-      '.rmmmmrs..',
-      '.rrrrrrr..',
-      '.RRRRRRR..',
-      '...kkk....',
-      '..k.kk....',
-    ],
+    _stack(_lean(_HEAD), _lean(_TORSO_A), _LEGS_RUN_A),
+    _stack(_lean(_HEAD), _lean(_TORSO_B), _LEGS_RUN_B),
+    _stack(_lean(_HEAD), _lean(_TORSO_A), _LEGS_RUN_C),
+    _stack(_lean(_HEAD), _lean(_TORSO_B), _LEGS_RUN_D),
   ],
 
-  // Rising: knees tucked, robe pulled tight, hand thrown up.
+  // Rising: knees tucked, one hand thrown up.
   jump: [
-    [
-      '..ll......',
-      '..lll.....',
-      '..lrrr....',
-      '.rrrrrr...',
-      'rrrrrrrr..',
-      '.RRRRRR...',
-      '..ssswe...',
-      '..swwwS...',
-      '...www....',
-      '..rrwrrs..',
-      '.rrrwrrs..',
-      '.rmmmmr...',
-      '.rrrrrr...',
-      '..RRRRR...',
-      '..kk.kk...',
-      '...k..k...',
-    ],
+    _stack(_HEAD, _TORSO_JUMP, ['..pp.pp...', '..p...p...', '..k...k...']),
   ],
 
-  // Falling: the robe catches the air and flares, arms out for balance.
+  // Falling: the tunic catches the air and flares, arms out for balance.
   fall: [
-    [
-      '..ll......',
-      '..lll.....',
-      '..lrrr....',
-      '.rrrrrr...',
-      'rrrrrrrr..',
-      '.RRRRRR...',
-      '..ssswe...',
-      '..swwwS...',
-      '...www....',
-      '.srrwrrs..',
-      '.rrrwrrr..',
-      '.rmmmmrr..',
-      'rrrrrrrr..',
-      '.RRRRRRR..',
-      '..kk.kk...',
-      '..k...k...',
-    ],
+    _stack(_HEAD, _TORSO_FALL, ['..pp.pp...', '..p...p...', '.kk...kk..']),
   ],
 
   swim: [
-    [
-      '..ll......',
-      '..lll.....',
-      '..lrrr....',
-      '.rrrrrr...',
-      'rrrrrrrr..',
-      '.RRRRRR...',
-      '..ssswe...',
-      '..swwwS...',
-      '...www....',
-      's.rrwrr.s.',
-      '.rrrwrrr..',
-      '.rmmmmrr..',
-      '.rrrrrrr..',
-      '.RRRRRRR..',
-      '.kk..kk...',
-      '..k....k..',
-    ],
-    [
-      '..ll......',
-      '..lll.....',
-      '..lrrr....',
-      '.rrrrrr...',
-      'rrrrrrrr..',
-      '.RRRRRR...',
-      '..ssswe...',
-      '..swwwS...',
-      '...www....',
-      '..rrwrr...',
-      'srrrwrrrs.',
-      '.rmmmmrr..',
-      '.rrrrrrr..',
-      '.RRRRRRR..',
-      '..kkkk....',
-      '...k..k...',
-    ],
+    _stack(_HEAD, _TORSO_SWIM_A, ['.pp...pp..', '..p...p...', '..kk.kk...']),
+    _stack(_HEAD, _TORSO_SWIM_B, ['..ppp.pp..', '..p...p...', '...kk.k...']),
   ],
 
-  // Casting: arm forward, magic gathering in the hand, and the eye lit by it.
+  // Casting: arm thrust forward, magic gathering in the hand, and the eye and the
+  // arrow tattoo lit by it.
   cast: [
-    [
-      '..ll......',
-      '..lll.....',
-      '..lrrr....',
-      '.rrrrrr...',
-      'rrrrrrrr..',
-      '.RRRRRR...',
-      '..sssge...',
-      '..swwwS...',
-      '...www....',
-      '..rrwrrr..',
-      '.rrrwrrsg.',
-      '.rmmmmr...',
-      '.rrrrrrr..',
-      '.RRRRRRR..',
-      '..kk.kk...',
-      '..kk.kk...',
-    ],
-    [
-      '..ll......',
-      '..lll.....',
-      '..lrrr....',
-      '.rrrrrr...',
-      'rrrrrrrr..',
-      '.RRRRRR...',
-      '..sssge...',
-      '..swwwS...',
-      '...www....',
-      '..rrwrrsg.',
-      '.rrrwrrrg.',
-      '.rmmmmr...',
-      'rrrrrrrr..',
-      '.RRRRRRR..',
-      '..kk.kk...',
-      '..kk.kk...',
-    ],
+    _stack(_HEAD_CAST, _TORSO_CAST_A, _LEGS_STAND),
+    _stack(_HEAD_CAST, _TORSO_CAST_B, _LEGS_STAND),
   ],
 
-  // Struck: rocked backwards, eye screwed shut, arms flung wide.
+  // Struck: head rocked back, eye screwed shut, arms flung wide.
   hurt: [
-    [
-      '...ll.....',
-      '...lll....',
-      '...lrrr...',
-      '..rrrrrr..',
-      '.rrrrrrrr.',
-      '..RRRRRR..',
-      '...sssSs..',
-      '...swwwS..',
-      '....www...',
-      's.rrwrr.s.',
-      '.rrrwrrr..',
-      '.rmmmmrr..',
-      '.rrrrrrr..',
-      '.RRRRRRR..',
-      '..kk.kk...',
-      '.kk...kk..',
-    ],
+    _stack(_HEAD_SHUT.map((r) => r.slice(1) + '.'), _TORSO_HURT, ['..pp.pp...', '.pp...pp..', 'kk.....kk.']),
   ],
 
-  // Crumpled on the ground: closed eye, tucked hood and limbs no longer braced.
-  // Corpses use this still pose while their body tumbles from physical impulses.
+  // Crumpled on the ground. Corpses use this still pose while their body tumbles from
+  // physical impulses.
   dead: [
-    [
-      '..........',
-      '...lll....',
-      '..lrrrl...',
-      '.rrrrrr...',
-      'rrrrrrrr..',
-      '.RRRRRR...',
-      '..sssSs...',
-      '..swwwS...',
-      '...www....',
-      '.srrwrrs..',
-      'srrrwrrrs.',
-      '.rmmmmr...',
-      '..rr.rr...',
-      '.RRRRRR...',
-      '.kk...kk..',
-      '..........',
-    ],
+    _stack(['..........'], _HEAD_SHUT, [
+      'srrryyrrs.',
+      '.rrrryrry.',
+      '.yyyyyyyY.',
+      '.rrrrrrr..',
+      '.rrrrrrr..',
+      '.RRRRRRR..',
+    ], ['..pp.pp...', '.pp...pp..', '.kk...kk..']).slice(0, 16),
   ],
 });
 
 // ---------- enemy art ----------
 //
-// 10 wide, 14 tall, two frames each. These are not people, so the brief for each is a
-// silhouette you can name at a glance with the colour removed: a horned imp, a slab,
-// a spark, a droplet, a hood, a shard cluster.
+// 10 wide, 14 tall, two frames each. Enemies are rival benders, one per element, and the
+// brief for each is a silhouette you can name with the colour removed: a spiked helm
+// over broad pauldrons, a wide straw hat, wild hair and sparking fingers, a fur hood, a
+// bare black cloak, a tall glowing crown.
+//
+//   r/R/l  cloth in the archetype colour   a  gold trim       f  white fur
+//   k      dark armour / cloak             h  hair and mask   s/S  skin and shadow
+//   w      element glow (eyes, hands)      e  pupil
+
+// Shared leg cycles. Each enemy supplies its top 11 rows; the second frame bobs the top
+// down a pixel and swaps legs, which is all the animation a two-frame walk needs.
+function _enemyPair(top, legsA, legsB) {
+  return [
+    compileSprite(_stack(top, legsA)),
+    compileSprite(_stack(['..........'], top.slice(0, 10), legsB)),
+  ];
+}
+const _E_LEGS_A = ['..RR.RR...', '..RR.RR...', '..kk.kk...'];
+const _E_LEGS_B = ['..RR.RR...', '.RR...RR..', '.kk...kk..'];
 
 const ENEMY_FRAMES = {
-  // Fire: a small hunched imp with a flame licking off its skull.
-  Emberling: [
-    compileSprite([
-      '....l.....',
-      '...lll....',
-      '...lrl....',
-      '..rrrrr...',
-      '..rwrwr...',
-      '..rrkrr...',
-      '.rrrrrrr..',
-      '.rrRRRrr..',
-      '.rrrrrrr..',
-      '..rrrrr...',
-      '..rr.rr...',
-      '..kk.kk...',
-      '..kk.kk...',
-      '.kkk.kkk..',
-    ]),
-    compileSprite([
-      '...ll.....',
-      '...lll....',
-      '..llrl....',
-      '..rrrrr...',
-      '..rwrwr...',
-      '..rrkrr...',
-      '.rrrrrrr..',
-      '.rrRRRrr..',
-      '.rrrrrrr..',
-      '..rrrrr...',
-      '..rr.rr...',
-      '..kk.kk...',
-      '.kk...kk..',
-      '.kk...kk..',
-    ]),
-  ],
+  // Fire: spiked helm, flared pauldrons, gold-trimmed red armour.
+  'Cinder Guard': _enemyPair([
+    '....aa....',
+    '...aaaa...',
+    '..kkkkkk..',
+    '..kkkkkkk.',
+    '..kssswsk.',
+    '...sSSSS..',
+    '.kkrrrrkk.',
+    '.krraarrks',
+    '.krrrrrrk.',
+    '..aaaaaa..',
+    '..rrrrrr..',
+  ], _E_LEGS_A, _E_LEGS_B),
 
-  // Earth: no neck, no waist, all shoulder. Twice as wide as it is agile.
-  Pebbleback: [
-    compileSprite([
-      '..........',
-      '..llllll..',
-      '.rrrrrrrr.',
-      '.rrwrrwrr.',
-      '.rrrrrrrr.',
-      'rrrrrrrrrr',
-      'rrRrrrrRrr',
-      'rrrrrrrrrr',
-      '.rrrrrrrr.',
-      '.rRRRRRRr.',
-      '.rr....rr.',
-      '.kk....kk.',
-      '.kk....kk.',
-      'kkk....kkk',
-    ]),
-    compileSprite([
-      '..........',
-      '..llllll..',
-      '.rrrrrrrr.',
-      '.rrwrrwrr.',
-      '.rrrrrrrr.',
-      'rrrrrrrrrr',
-      'rrRrrrrRrr',
-      'rrrrrrrrrr',
-      '.rrrrrrrr.',
-      '.rRRRRRRr.',
-      '..r....r..',
-      '..k....k..',
-      '.kk....kk.',
-      '.kkk..kkk.',
-    ]),
-  ],
+  // Earth: broad straw hat over a squat, wide-shouldered robe.
+  'Stone Warden': _enemyPair([
+    '....aa....',
+    '...aaaa...',
+    '.aaaaaaaa.',
+    '..ssswss..',
+    '..sssSSs..',
+    '..rrrrrr..',
+    '.rrrllrrr.',
+    'rrrrllrrrs',
+    '.rrrrrrrr.',
+    '.RRRRRRRR.',
+    '..RRRRRR..',
+  ], _E_LEGS_A, _E_LEGS_B),
 
-  // Lightning: thin, jagged, permanently mid-discharge.
-  Sparkling: [
-    compileSprite([
-      '..l....l..',
-      '...l..l...',
-      '....ll....',
-      '...rrrr...',
-      '...wrrw...',
-      '...rrrr...',
-      '..lrrrrl..',
-      '...rrrr...',
-      '..r.rr.r..',
-      '...rrrr...',
-      '...r..r...',
-      '...r..r...',
-      '..kk..kk..',
-      '..kk..kk..',
-    ]),
-    compileSprite([
-      '...l..l...',
-      '..l....l..',
-      '....ll....',
-      '...rrrr...',
-      '...wrrw...',
-      '...rrrr...',
-      '...rrrr...',
-      '..lrrrrl..',
-      '..r.rr.r..',
-      '...rrrr...',
-      '...r..r...',
-      '..k....k..',
-      '..kk..kk..',
-      '.kk....kk.',
-    ]),
-  ],
+  // Lightning: wild spiked hair and a hand that will not stop sparking.
+  'Storm Adept': _enemyPair([
+    '..h.h.h...',
+    '..hhhhhh..',
+    '..hhhhhh..',
+    '..sswsss..',
+    '...ssSS...',
+    '..rrrrrr..',
+    '.rrllrrrr.',
+    '.rrllrrrrs',
+    '..rrrrrr.w',
+    '..rrrrrr..',
+    '..RRRRRR..',
+  ], _E_LEGS_A, _E_LEGS_B),
 
-  // Water: a droplet that grew eyes, wide at the shoulder and tapering to a trickle.
-  Tidewisp: [
-    compileSprite([
-      '....ll....',
-      '...llll...',
-      '..llrrll..',
-      '..rrrrrr..',
-      '.rwrrrrwr.',
-      '.rrrrrrrr.',
-      '.rrrrrrrr.',
-      '..rrrrrr..',
-      '..rRRRRr..',
-      '...rrrr...',
-      '..r.rr.r..',
-      '..r.rr.r..',
-      '...rrrr...',
-      '..RR..RR..',
-    ]),
-    compileSprite([
-      '...ll.....',
-      '..llll....',
-      '..llrrl...',
-      '..rrrrrr..',
-      '.rwrrrrwr.',
-      '.rrrrrrrr.',
-      '.rrrrrrrr.',
-      '..rrrrrr..',
-      '..rRRRRr..',
-      '..rrrrrr..',
-      '..r.rr.r..',
-      '...rrrr...',
-      '..rr..rr..',
-      '..R....R..',
-    ]),
-  ],
+  // Water: a face peering out of a fur-trimmed parka hood.
+  'Tide Mystic': _enemyPair([
+    '...ffff...',
+    '..ffffff..',
+    '.ffsswsff.',
+    '.ffsssSff.',
+    '..frrrrf..',
+    '.rrrllrrr.',
+    '.rrllllrrs',
+    '.rrrrrrrr.',
+    '.rrraarrr.',
+    '.RRRRRRRR.',
+    '..RRRRRR..',
+  ], _E_LEGS_A, _E_LEGS_B),
 
-  // Dark: a hood with two lights in it and nothing underneath but tatters.
-  Shade: [
-    compileSprite([
-      '...RRR....',
-      '..RrrrR...',
-      '..RrrrR...',
-      '.RrwrwrR..',
-      '.Rrrrrrr..',
-      '.rrrrrrr..',
-      'rrrrrrrrr.',
-      'rrrrrrrrr.',
-      '.rrrrrrr..',
-      '.rrrrrrr..',
-      '..rrrrr...',
-      '..R.r.R...',
-      '...R.R....',
-      '..R...R...',
-    ]),
-    compileSprite([
-      '...RRR....',
-      '..RrrrR...',
-      '..RrrrR...',
-      '.RrwrwrR..',
-      '.Rrrrrrr..',
-      '.rrrrrrr..',
-      '.rrrrrrrr.',
-      '.rrrrrrrr.',
-      '.rrrrrrr..',
-      '..rrrrr...',
-      '..rrrrr...',
-      '...r.r....',
-      '..R.R.R...',
-      '...R...R..',
-    ]),
-  ],
+  // Dark: a bottomless hood with two lit eyes and nothing else.
+  'Dusk Stalker': _enemyPair([
+    '...kkkk...',
+    '..kkkkkk..',
+    '.kkkhhkkk.',
+    '.kkhwhwkk.',
+    '.kkhhhhkk.',
+    '..kkkkkk..',
+    '.kkkrrkkk.',
+    '.kkrrrrkks',
+    '.kkkrrkkk.',
+    '.kkkkkkkk.',
+    '..kkkkkk..',
+  ], _E_LEGS_A, _E_LEGS_B),
 
-  // Arcane: not a body at all — a cluster of shards orbiting one open eye.
-  Riftling: [
-    compileSprite([
-      '....l.....',
-      '...lrl....',
-      '..lrrrl...',
-      '.lrrrrrl..',
-      'lrrrwrrrl.',
-      '.lrrrrrl..',
-      '..lrrrl...',
-      '...lrl....',
-      '....l.....',
-      '..r....r..',
-      '...r..r...',
-      '....rr....',
-      '...R..R...',
-      '..R....R..',
-    ]),
-    compileSprite([
-      '..........',
-      '....l.....',
-      '..llrll...',
-      '.lrrrrrl..',
-      'lrrrwrrrl.',
-      'lrrrrrrrl.',
-      '.lrrrrrl..',
-      '..llrll...',
-      '....l.....',
-      '...r..r...',
-      '..r....r..',
-      '...rr.....',
-      '..R..R....',
-      '...R...R..',
-    ]),
-  ],
+  // Arcane: a tall glowing crown over a carved mask, a rune burning on the chest.
+  'Spirit Mask': _enemyPair([
+    '....ww....',
+    '...wllw...',
+    '..llllll..',
+    '..lhwhwl..',
+    '..lhhhhl..',
+    '...rrrr...',
+    '..rrwwrr..',
+    '.rrrwwrrrs',
+    '..rrwwrr..',
+    '..rrrrrr..',
+    '..RRRRRR..',
+  ], _E_LEGS_A, _E_LEGS_B),
 };
 
 // ---------- animation ----------
@@ -794,7 +580,7 @@ const Sprites = {
   compileSprite,
   drawSprite,
   robePalette,
-  creaturePalette,
+  enemyPalette,
   tintPalette,
   playerClip,
   advanceAnim,

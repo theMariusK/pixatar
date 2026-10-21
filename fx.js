@@ -960,7 +960,7 @@ class FXSystem {
   _drawColumn(g, e, t, pal) {
     const dir = e.upward ? -1 : 1;
     const h = e.h * (1 - t * 0.35);
-    const x0 = e.x - e.w / 2, x1 = e.x + e.w / 2;
+    const x0 = e.x - e.w / 2;
     const y0 = e.y, y1 = e.y + dir * h;
     // A per-frame horizontal wobble makes the pillar look like it is under pressure
     // rather than being a rectangle someone drew.
@@ -971,7 +971,6 @@ class FXSystem {
     g.fillRect(x0 + wob, Math.min(y0, y1), e.w, Math.abs(h));
     g.fillStyle(pal.core, 0.9 * t);
     g.fillRect(e.x - e.w * 0.18 + wob, Math.min(y0, y1), e.w * 0.36, Math.abs(h));
-    void x1;
   }
 
   _drawRune(g, e, t, pal) {

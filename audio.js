@@ -312,6 +312,8 @@ const GameAudio = (() => {
     }
   }
 
+  let unlockBound = false;
+
   function bindButton(button) {
     domButton = button;
     let keyboardActivation = false;
@@ -347,13 +349,16 @@ const GameAudio = (() => {
         && ['join', 'create'].includes(activeScene.screen)) return;
       toggleFromGesture();
     };
-    document.addEventListener('pointerdown', (event) => {
-      if (!isAudioControl(event.target)) unlock();
-    }, { capture: true, passive: true });
-    document.addEventListener('keydown', (event) => {
-      if (String(event.key).toLowerCase() === 'm' || isAudioControl(event.target)) return;
-      unlock();
-    }, { capture: true, passive: true });
+    if (!unlockBound) {
+      unlockBound = true;
+      document.addEventListener('pointerdown', (event) => {
+        if (!isAudioControl(event.target)) unlock();
+      }, { capture: true, passive: true });
+      document.addEventListener('keydown', (event) => {
+        if (String(event.key).toLowerCase() === 'm' || isAudioControl(event.target)) return;
+        unlock();
+      }, { capture: true, passive: true });
+    }
     window.addEventListener('keydown', lastListener, { capture: true });
   }
 

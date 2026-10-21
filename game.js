@@ -3128,11 +3128,10 @@ class SandScene extends Phaser.Scene {
     return null;
   }
 
-  // The colour the caster's robe is dyed. In multiplayer that is the identity the
-  // server handed out; solo it is the old neutral white, so the character you have
-  // been playing does not change colour just because it grew a body.
+  // The colour the caster's tunic is dyed. In multiplayer that is the identity the
+  // server handed out; solo it is the classic monk orange.
   playerTint() {
-    return this.multiplayer ? this.netColor : 0xf0f0f0;
+    return this.multiplayer ? this.netColor : 0xe8873a;
   }
 
   // What the casting hand glows with: whatever spell is actually about to come out
