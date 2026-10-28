@@ -219,7 +219,7 @@ class BendingAbilities {
     if (earth.rock?.defensiveCaught && earth.rock.cells.length) {
       const form = earth.form;
       earth.form = 'Bolt';
-      const thrown = earth.punch();
+      const thrown = earth.punch({ whole: true });
       earth.form = form;
       this.cooldowns.set('Catch', this.scene.time.now + BENDING_ABILITY_RULES.Catch.cooldown * 1000);
       return thrown;

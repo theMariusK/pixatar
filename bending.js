@@ -8,6 +8,11 @@
 // the wisps are pure force rather than matter — they push what they pass instead
 // of landing as a cell.
 //
+// The ring at the cursor is the bend zone (see BEND_ZONE below). Matter is gathered or
+// kindled inside it, and Punch strikes only what is inside it when RMB is pressed; the
+// rest of what is held is let go and falls. Hold the cursor steady on your matter so it
+// settles into the ring, then strike.
+//
 // Every element has a Form and an Action (game.js, Q opens the picker):
 // Bolt gathers near the cursor; Orbit holds a ring around the caster.
 // Normal releases what is held; Punch turns it into an element-specific attack.
@@ -284,6 +289,47 @@ function bendReleasePower(scene, element) {
 
 function bendHoldingPaused(scene, element) {
   return (scene.wheelOpen || scene.bendWheelOpen) && scene.attackControl?.keeps(element);
+}
+
+// ---------------------------------------------------------------------------
+// the bend zone — the circle around the cursor
+// ---------------------------------------------------------------------------
+//
+// The ring drawn at the cursor is the one place a bender works. Matter is gathered or
+// conjured inside it, and its radius is the size setting (mouse wheel): exactly big
+// enough to hold the most matter the bender may carry once it has settled. Matter chases
+// the cursor with some lag, so a fast sweep leaves pieces trailing outside the ring.
+//
+// Punch then asks one question of every piece: is it inside the ring right now? What
+// is inside is struck and thrown at the aim; what is outside is let go and falls. So
+// "keep the cursor still on the matter, then strike" is the whole technique.
+const BEND_ZONE = {
+  MAX_CELLS: 16,      // largest zone, in cells — bounds the gather-offset table
+  TOLERANCE: 1.15,    // a piece just past the rim still counts as inside; the blob swirls
+};
+
+// The ring's radius in px for a blob of `capacity` pieces packed at `spacing`.
+function bendZoneRadius(scene, element, maximum, spacing, minCells) {
+  const size = scene.attackControl?.capacity(element) ?? maximum;
+  const blob = spacing * PIXEL * Math.sqrt(size + 0.5);
+  return Math.min(BEND_ZONE.MAX_CELLS * PIXEL, Math.max(minCells * PIXEL, blob));
+}
+
+// Splits held pieces by whether they sit inside the ring centred on `center`.
+function bendSplitZone(center, radius, pieces) {
+  const limit = radius * BEND_ZONE.TOLERANCE;
+  const inside = [], outside = [];
+  for (const d of pieces) {
+    (Math.hypot(d.x - center.x, d.y - center.y) <= limit ? inside : outside).push(d);
+  }
+  return { inside, outside };
+}
+
+// A Punch with nothing inside the ring does nothing at all, rather than throwing away
+// everything held: the fix is to move the cursor back over the matter.
+function bendNothingInZone(scene) {
+  scene.attackControl?.feedback?.('Hold the cursor over your matter, then strike');
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -583,11 +629,15 @@ class WaterBending {
     this.free = [];    // released drops, falling until they land: { x, y, vx, vy, age }
     this.active = false;
     this.grabAcc = 0;
-    this.grabOffsets = bendDiscOffsets(BEND.GRAB_RADIUS);
+    this.grabOffsets = bendDiscOffsets(BEND_ZONE.MAX_CELLS);
     this.settleOffsets = bendDiscOffsets(BEND.SETTLE_RADIUS);
     this.gfx = scene.add.graphics().setDepth(8.5);
     this.hitCooldowns = new Map();
     this.surfaceDamage = bendSurfaceDamage(scene);
+  }
+
+  zoneRadius() {
+    return bendZoneRadius(this.scene, this.element, BEND.CAPACITY, BEND.SPACING, BEND.GRAB_RADIUS);
   }
 
   begin() {
@@ -628,11 +678,18 @@ class WaterBending {
     const s = this.scene;
     const p = s.player;
     const cx = p.x + p.w / 2, cy = p.y + p.h / 2;
-    const count = this.held.length;
+    // Bolt strikes only what is inside the ring; the rest of the water falls.
+    let struck = this.held, spilled = [];
+    if (this.form !== 'Orbit') {
+      ({ inside: struck, outside: spilled } = bendSplitZone(this.target(), this.zoneRadius(), this.held));
+      if (!struck.length) return bendNothingInZone(s);
+    }
+    const count = struck.length;
     const shot = bendShot(s, this.element);
     const aim = bendAim(s);
+    for (const d of spilled) { d.age = 0; this.free.push(d); }
     for (let i = 0; i < count; i++) {
-      const drop = this.held[i];
+      const drop = struck[i];
       const dir = this.form === 'Orbit'
         ? bendOutward(drop.x, drop.y, cx, cy, i, count, this.spin || 0) : aim;
       const speed = (this.form === 'Orbit' ? BEND.SPLASH_SPEED : BEND.PUNCH_SPEED) * shot.speed;
@@ -776,7 +833,9 @@ class WaterBending {
     const pgx = (p.x + p.w / 2) / PIXEL, pgy = (p.y + p.h / 2) / PIXEL;
     const pointer = s.input.activePointer;
     const cgx = Math.floor(pointer.worldX / PIXEL), cgy = Math.floor(pointer.worldY / PIXEL);
-    for (const [dx, dy] of this.grabOffsets) {
+    const zone = this.zoneRadius() / PIXEL;
+    for (const [dx, dy, dist] of this.grabOffsets) {
+      if (dist > zone) break;
       if (n <= 0 || this.held.length >= capacity) break;
       const x = cgx + dx, y = cgy + dy;
       if (x <= 0 || x >= COLS - 1 || y <= 0 || y >= ROWS - 1) continue;
@@ -1012,7 +1071,7 @@ class EarthBending {
     // Rock slots, grid-aligned and nearest-first, so the rock grows outward from its
     // centre as a compact lump. Radius 12 holds far more than CAPACITY.
     this.slots = bendDiscOffsets(12);
-    this.grabOffsets = bendDiscOffsets(EARTH_BEND.GRAB_RADIUS);
+    this.grabOffsets = bendDiscOffsets(BEND_ZONE.MAX_CELLS);
     this.settleOffsets = bendDiscOffsets(4);
     this.gfx = scene.add.graphics().setDepth(8.5);
     this.hitCooldowns = new Map();
@@ -1022,14 +1081,61 @@ class EarthBending {
     return (this.rock ? this.rock.cells.length : 0) + this.pieces.length;
   }
 
-  punch() {
+  // The ring is sized for a rock of `capacity` cells packed into a disc, plus a cell of
+  // margin for the slot grid's rough edge.
+  zoneRadius() {
+    const size = this.scene.attackControl?.capacity(this.element) ?? EARTH_BEND.CAPACITY;
+    return Math.min(BEND_ZONE.MAX_CELLS * PIXEL, (Math.sqrt(size / Math.PI) + 1) * PIXEL);
+  }
+
+  target() {
+    return this.scene.attackControl?.holdingTarget(this.element) || bendTarget(this.scene, EARTH_BEND.REACH);
+  }
+
+  // Bolt Punch keeps only the stone inside the ring: cells outside it, and lifted
+  // pieces still on their way, are let go and fall as loose pieces. Returns how many
+  // cells remain in the rock, without changing anything when none would.
+  splitRockZone(rock) {
+    const t = this.target();
+    const limit = this.zoneRadius() * BEND_ZONE.TOLERANCE;
+    const within = (x, y) => Math.hypot(x - t.x, y - t.y) <= limit;
+    const cells = rock.cells.filter((c) => within(rock.x + c.ox * PIXEL, rock.y + c.oy * PIXEL));
+    const pieces = this.pieces.filter((pc) => within(pc.x, pc.y));
+    if (!cells.length && !pieces.length) return null;
+    return { cells, pieces, within };
+  }
+
+  // `whole` throws the entire rock regardless of the ring — for a rock caught out of
+  // the air, which hangs where it was caught rather than where the cursor is.
+  punch({ whole = false } = {}) {
     if (!this.rock || !this.holding) return false;
     const s = this.scene;
-    const shot = bendShot(s, this.element);
     const p = s.player;
     const cx = p.x + p.w / 2, cy = p.y + p.h / 2;
     const rock = this.rock;
+    let zone = null;
+    if (this.form !== 'Orbit' && !whole) {
+      zone = this.splitRockZone(rock);
+      if (!zone) return bendNothingInZone(s);
+    }
+    const shot = bendShot(s, this.element);
     delete rock.defensiveCaught;
+    if (zone) {
+      // Everything outside the ring falls where it hangs.
+      const M = PixelWorld.MAT;
+      for (const c of rock.cells) {
+        if (zone.cells.includes(c)) continue;
+        this.loosePieces.push({ x: rock.x + c.ox * PIXEL, y: rock.y + c.oy * PIXEL, vx: 0, vy: 0,
+          mat: M.STONE, variant: c.shade, age: 0 });
+      }
+      for (const pc of this.pieces) {
+        if (zone.pieces.includes(pc)) continue;
+        this.loosePieces.push({ x: pc.x, y: pc.y, vx: 0, vy: 0, mat: pc.mat, variant: pc.variant, age: 0 });
+      }
+      rock.cells = zone.cells;
+      this.pieces = zone.pieces;
+      rock.bendBounds = null;
+    }
     // Pieces already lifted from terrain belong to this attack even if they
     // had not reached their slots yet. Fusing them preserves their cell count.
     for (const piece of this.pieces) {
@@ -1287,7 +1393,9 @@ class EarthBending {
     const feet = Math.floor((p.y + p.h) / PIXEL);
     const pointer = s.input.activePointer;
     const cgx = Math.floor(pointer.worldX / PIXEL), cgy = Math.floor(pointer.worldY / PIXEL);
-    for (const [dx, dy] of this.grabOffsets) {
+    const zone = this.zoneRadius() / PIXEL;
+    for (const [dx, dy, dist] of this.grabOffsets) {
+      if (dist > zone) break;
       if (this.holding >= capacity) break;
       const x = cgx + dx, y = cgy + dy;
       if (x <= 0 || x >= COLS - 1 || y <= 0 || y >= ROWS - 1) continue;
@@ -1338,7 +1446,7 @@ class EarthBending {
   // pebble whips around and a boulder lumbers.
   steerRock(dt) {
     const rock = this.rock;
-    const t = this.scene.attackControl?.holdingTarget(this.element) || bendTarget(this.scene, EARTH_BEND.REACH);
+    const t = this.target();
     const mass = rock.cells.length / EARTH_BEND.CAPACITY;
     const max = EARTH_BEND.MAX_SPEED * (1 - EARTH_BEND.HEAVY_SLOWDOWN * mass);
     let wx = (t.x - rock.x) * EARTH_BEND.FOLLOW, wy = (t.y - rock.y) * EARTH_BEND.FOLLOW;
@@ -1656,6 +1764,10 @@ class FireBending {
     this.surfaceDamage = bendSurfaceDamage(scene);
   }
 
+  zoneRadius() {
+    return bendZoneRadius(this.scene, this.element, FIRE_BEND.CAPACITY, FIRE_BEND.SPACING, FIRE_BEND.GRAB_RADIUS);
+  }
+
   begin() {
     this.active = true;
     this.grabAcc = 0;
@@ -1698,8 +1810,15 @@ class FireBending {
     const s = this.scene;
     const p = s.player;
     const cx = p.x + p.w / 2, cy = p.y + p.h / 2;
-    const count = this.held.length;
+    // Bolt strikes only the fire inside the ring; the rest drops as falling embers.
+    let struck = this.held, spilled = [];
+    if (this.form !== 'Orbit') {
+      ({ inside: struck, outside: spilled } = bendSplitZone(this.target(), this.zoneRadius(), this.held));
+      if (!struck.length) return bendNothingInZone(s);
+    }
+    const count = struck.length;
     const shot = bendShot(s, this.element);
+    for (const ember of spilled) { ember.age = 0; this.free.push(ember); }
     if (this.form === 'Orbit') {
       const phase = this.spin || 0;
       for (let i = 0; i < count; i++) {
@@ -1724,28 +1843,24 @@ class FireBending {
         { speed: 160, life: 0.5, rise: 20, size: 1.4 });
     } else {
       let x = 0, y = 0;
-      for (const ember of this.held) { x += ember.x; y += ember.y; }
+      for (const ember of struck) { x += ember.x; y += ember.y; }
       x /= count; y /= count;
       const aim = s.input.activePointer;
       const dx = aim.worldX - cx, dy = aim.worldY - cy;
       const dist = Math.hypot(dx, dy);
       const ux = dist > 1 ? dx / dist : (p.facing || 1);
       const uy = dist > 1 ? dy / dist : 0;
-      const size = Math.min(20, (5 + Math.sqrt(count) * 0.85) * (1 + shot.charge * 0.2));
+      // The fireball is the struck pixels themselves, flying in the formation they had
+      // in the ring. Only the flicker is added; nothing is redrawn as a generic ball.
       const embers = [];
-      const visualCount = Math.max(12, Math.min(96, count));
-      for (let i = 0; i < visualCount; i++) {
-        const held = this.held[i % count];
+      let reach = 0;
+      for (const held of struck) {
         const offsetX = held.x - x, offsetY = held.y - y;
-        const offset = Math.hypot(offsetX, offsetY);
-        embers.push({
-          angle: offset > 1 ? Math.atan2(offsetY, offsetX) : i * BEND_GOLDEN,
-          radius: Math.min(size * 0.9, offset * 0.24 + size * (0.2 + Math.random() * 0.5)),
-          spin: (i % 2 ? 1 : -1) * (3 + Math.random() * 6),
-          phase: Math.random() * Math.PI * 2,
-          scale: 0.65 + Math.random() * 0.8,
-        });
+        reach = Math.max(reach, Math.hypot(offsetX, offsetY));
+        embers.push({ ox: offsetX, oy: offsetY, phase: Math.random() * Math.PI * 2 });
       }
+      const size = Math.min(24, Math.max((5 + Math.sqrt(count) * 0.85) * (1 + shot.charge * 0.2),
+        reach + PIXEL / 2));
       this.fireballs.push({
         x, y, vx: ux * FIRE_BEND.BALL_SPEED * shot.speed, vy: uy * FIRE_BEND.BALL_SPEED * shot.speed,
         size, mass: count, attackPower: shot.power, life: FIRE_BEND.BALL_LIFE, age: 0, trail: 0, embers,
@@ -1908,6 +2023,13 @@ class FireBending {
   }
 
   fireballEmberPoint(ball, ember) {
+    // Struck pixels keep their place in the formation and only shiver in it.
+    if (ember.ox !== undefined) {
+      return {
+        x: ball.x + ember.ox + Math.sin(ball.age * 23 + ember.phase) * 0.6,
+        y: ball.y + ember.oy + Math.cos(ball.age * 19 + ember.phase) * 0.6,
+      };
+    }
     const angle = ember.angle + ball.age * ember.spin
       + Math.sin(ball.age * 13 + ember.phase) * 0.22;
     const radius = ember.radius * (0.76 + Math.sin(ball.age * 19 + ember.phase) * 0.2);
@@ -2077,17 +2199,25 @@ class FireBending {
     const sourceX = p.x + p.w / 2 + (p.facing || 1) * p.w * 0.35;
     const sourceY = p.y + p.h * 0.38;
     const target = this.target();
-    const dx = target.x - sourceX, dy = target.y - sourceY;
-    const dist = Math.max(1, Math.hypot(dx, dy));
+    const zone = this.zoneRadius() * 0.85;
     n = Math.min(n, capacity - this.held.length);
     for (let i = 0; i < n; i++) {
-      this.held.push({
-        x: sourceX + (Math.random() - 0.5) * 2,
-        y: sourceY + (Math.random() - 0.5) * 2,
-        vx: this.form === 'Orbit' ? 0 : dx / dist * 105,
-        vy: this.form === 'Orbit' ? 0 : dy / dist * 105,
-        life: FIRE_BEND.HOLD_LIFE,
-      });
+      if (this.form === 'Orbit') {
+        // Orbit's ring is built around the bender, so it is kindled at the hand.
+        this.held.push({
+          x: sourceX + (Math.random() - 0.5) * 2, y: sourceY + (Math.random() - 0.5) * 2,
+          vx: 0, vy: 0, life: FIRE_BEND.HOLD_LIFE,
+        });
+        continue;
+      }
+      // Bolt kindles fire right where the ring is, in the open air inside it.
+      for (let attempt = 0; attempt < 4; attempt++) {
+        const angle = Math.random() * Math.PI * 2, radius = zone * Math.sqrt(Math.random());
+        const x = target.x + Math.cos(angle) * radius, y = target.y + Math.sin(angle) * radius;
+        if (this.solidAt(x, y)) continue;
+        this.held.push({ x, y, vx: 0, vy: 0, life: FIRE_BEND.HOLD_LIFE });
+        break;
+      }
     }
     this.grabAcc = Math.min(this.grabAcc, 1);
   }
@@ -2283,7 +2413,7 @@ class FireBending {
       for (const ember of ball.embers) {
         const pt = this.fireballEmberPoint(ball, ember);
         const flicker = Math.sin(ball.age * 27 + ember.phase);
-        const width = PIXEL * ember.scale * (0.8 + Math.max(0, flicker) * 0.35);
+        const width = PIXEL * (ember.scale ?? 1) * (0.8 + Math.max(0, flicker) * 0.35);
         const color = flicker > 0.55 ? pal.core : flicker < -0.4 ? pal.accent : pal.glow;
         g.fillStyle(pal.deep, 0.24).fillRect(pt.x - width, pt.y - width, width * 2, width * 2);
         g.fillStyle(color, 0.8 + Math.max(0, flicker) * 0.2)
@@ -2349,12 +2479,16 @@ class AirBending {
     this.free = [];    // released wisps, flying until they dissipate: { x, y, vx, vy, age }
     this.active = false;
     this.grabAcc = 0;
-    this.grabOffsets = bendDiscOffsets(AIR_BEND.GRAB_RADIUS);
+    this.grabOffsets = bendDiscOffsets(BEND_ZONE.MAX_CELLS);
     this.gfx = scene.add.graphics().setDepth(8.5);
     this.jetDirections = new Map();
     this.nextJetId = 0;
     this.rings = [];
     this.surfaceDamage = bendSurfaceDamage(scene);
+  }
+
+  zoneRadius() {
+    return bendZoneRadius(this.scene, this.element, AIR_BEND.CAPACITY, AIR_BEND.SPACING, AIR_BEND.GRAB_RADIUS);
   }
 
   begin() {
@@ -2395,7 +2529,15 @@ class AirBending {
     const s = this.scene;
     const p = s.player;
     const cx = p.x + p.w / 2, cy = p.y + p.h / 2;
-    const count = this.held.length;
+    // Bolt strikes only the wind inside the ring; the rest simply disperses.
+    let struck = this.held;
+    if (this.form !== 'Orbit') {
+      const split = bendSplitZone(this.target(), this.zoneRadius(), this.held);
+      if (!split.inside.length) return bendNothingInZone(s);
+      struck = split.inside;
+      for (const wisp of split.outside) this.dissipate(wisp);
+    }
+    const count = struck.length;
     const shot = bendShot(s, this.element);
     if (this.form === 'Orbit') {
       this.held.length = 0;
@@ -2410,7 +2552,7 @@ class AirBending {
       const aim = bendAim(s);
       const id = ++this.nextJetId;
       this.jetDirections.set(id, aim);
-      for (const wisp of this.held) {
+      for (const wisp of struck) {
         wisp.vx = aim.x * AIR_BEND.PUNCH_SPEED * shot.speed;
         wisp.vy = aim.y * AIR_BEND.PUNCH_SPEED * shot.speed;
         wisp.attackPower = shot.power;
@@ -2502,7 +2644,9 @@ class AirBending {
     const pgx = (p.x + p.w / 2) / PIXEL, pgy = (p.y + p.h / 2) / PIXEL;
     const pointer = s.input.activePointer;
     const cgx = Math.floor(pointer.worldX / PIXEL), cgy = Math.floor(pointer.worldY / PIXEL);
-    for (const [dx, dy] of this.grabOffsets) {
+    const zone = this.zoneRadius() / PIXEL;
+    for (const [dx, dy, dist] of this.grabOffsets) {
+      if (dist > zone) break;
       if (n <= 0 || this.held.length >= capacity) break;
       const x = cgx + dx, y = cgy + dy;
       if (x <= 0 || x >= COLS - 1 || y <= 0 || y >= ROWS - 1) continue;

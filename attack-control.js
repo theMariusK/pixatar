@@ -132,7 +132,9 @@ class BendingAttackControl {
         ball.mass -= count;
         const ratio = Math.sqrt(ball.mass / Math.max(1, before));
         ball.size *= ratio;
-        for (const ember of ball.embers || []) ember.radius *= ratio;
+        for (const ember of ball.embers || []) {
+          if (ember.ox !== undefined) { ember.ox *= ratio; ember.oy *= ratio; } else ember.radius *= ratio;
+        }
         if (ball.mass < 1) record.source.splice(record.source.indexOf(ball), 1);
         for (let i = 0; i < count; i++) {
           const drop = { x: ball.x, y: ball.y, vx: 0, vy: 0, age: 0,

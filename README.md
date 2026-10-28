@@ -21,6 +21,19 @@ Hold **Q** and select an element, Bolt/Orbit, and an action. Bolt/Orbit controls
 you gather material; the outer ring chooses your **right mouse button** ability.
 Hold **LMB** to gather, and use **RMB** while keeping your material held.
 
+## The bend zone
+
+The ring around your cursor is where you bend. Hold **LMB** to gather water or earth
+from inside it, or to kindle fire and wind right where the ring is. The matter chases the
+cursor with a little lag, so a quick sweep leaves pieces trailing behind.
+
+To strike, keep the cursor steady on your matter until it settles inside the ring, then
+press **RMB** (with **Punch** selected). Everything inside the ring is struck and shot
+toward your aim — a fireball keeps the exact pixels it had in the ring — while
+everything outside it is let go and falls. If nothing is inside the ring, Punch does
+nothing and your matter stays held. The mouse wheel sizes the ring and the amount you
+carry. Orbit form is unchanged: its ring circles you, and Punch releases all of it.
+
 ## Attack control
 
 | Control | Effect |

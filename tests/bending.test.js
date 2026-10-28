@@ -18,8 +18,9 @@ const ctx = {
   Phaser: { Display: { Color: { GetColor: () => 0 } } },
   Math: Object.assign(Object.create(Math), { random: () => 0 }),
 };
-const { WaterBending, EarthBending, FireBending, AirBending, orbitStrike } =
-  vm.runInNewContext(source + '\n({ WaterBending, EarthBending, FireBending, AirBending, orbitStrike })', ctx);
+const { WaterBending, EarthBending, FireBending, AirBending, orbitStrike, bendSplitZone } =
+  vm.runInNewContext(source + '\n({ WaterBending, EarthBending, FireBending, AirBending, orbitStrike, bendSplitZone })', ctx);
+const bendSplitZoneFor = (b) => bendSplitZone(b.target(), b.zoneRadius(), b.held);
 
 function scene() {
   const hits = [];
@@ -340,7 +341,7 @@ test('opening the Q wheel releases held bending while free matter keeps moving',
 
 test('Water Bolt Punch uses held drops as a pushing, dousing jet', () => {
   const s = scene();
-  s.input.activePointer = { worldX: 200, worldY: 36 };
+  s.input.activePointer = { worldX: 70, worldY: 36 };
   s.remotePlayers.other = { x: 100, y: 20 };
   s.grid[s.idx(28, 12)] = MAT.FIRE;
   const bend = new WaterBending(s);
@@ -626,7 +627,7 @@ test('earth breaks light terrain and strikes bodies', () => {
 
 test('Earth Bolt Punch drives the gathered rock through light terrain into a player', () => {
   const s = scene();
-  s.input.activePointer = { worldX: 200, worldY: 36 };
+  s.input.activePointer = { worldX: 70, worldY: 36 };
   s.remotePlayers.other = { x: 100, y: 20 };
   s.grid[s.idx(30, 12)] = MAT.GLASS;
   const bend = new EarthBending(s);
@@ -868,7 +869,7 @@ test('air preserves enemy push and relays player push', () => {
 
 test('Air Bolt Punch pushes players and loose objects forward', () => {
   const s = scene();
-  s.input.activePointer = { worldX: 200, worldY: 36 };
+  s.input.activePointer = { worldX: 70, worldY: 36 };
   s.remotePlayers.other = { x: 95, y: 20 };
   s.debris.push({ x: 92, y: 36, vx: 0, vy: 0 });
   s.projectiles.push({ x: 92, y: 36, vx: 0, vy: 0 });
@@ -922,18 +923,177 @@ test('water, earth, and fire bending spare the caster while air pushes them', ()
   assert.ok(s.selfHits.at(-1).bend.iy < 0);
 });
 
-test('fire embers originate at the caster and travel toward the cursor', () => {
+test('Bolt fire is kindled at the cursor, inside the bend zone', () => {
   const s = scene();
   const fire = new FireBending(s);
+  const zone = fire.zoneRadius();
+  fire.grab(0.05);
+  assert.ok(fire.held.length > 0);
+  const { worldX, worldY } = s.input.activePointer;
+  for (const ember of fire.held) {
+    assert.ok(Math.hypot(ember.x - worldX, ember.y - worldY) <= zone);
+  }
+});
+
+test('Orbit fire is still kindled at the caster and travels to its ring', () => {
+  const s = scene();
+  const fire = new FireBending(s);
+  fire.form = 'Orbit';
   fire.grab(0.05);
   assert.ok(fire.held.length > 0);
   for (const ember of fire.held) {
     assert.ok(ember.x >= s.player.x && ember.x <= s.player.x + s.player.w);
     assert.ok(ember.y >= s.player.y && ember.y <= s.player.y + s.player.h);
   }
-  const startX = fire.held[0].x;
-  fire.steerHeld(0.05);
-  assert.ok(fire.held[0].x > startX);
+});
+
+test('the bend zone grows with the size setting and never shrinks below the grab ring', () => {
+  const s = scene();
+  const fire = new FireBending(s);
+  const full = fire.zoneRadius();
+  s.attackControl = { capacity: () => 4 };
+  assert.equal(fire.zoneRadius(), 6 * PIXEL);
+  s.attackControl = { capacity: () => 120 };
+  assert.equal(fire.zoneRadius(), full);
+  for (const Bender of [WaterBending, EarthBending, AirBending]) {
+    const bend = new Bender(s);
+    s.attackControl = { capacity: () => 4 };
+    const small = bend.zoneRadius();
+    s.attackControl = { capacity: () => 100000 };
+    const large = bend.zoneRadius();
+    assert.ok(small < large);
+    assert.ok(large <= 16 * PIXEL);
+  }
+});
+
+test('Fire Punch strikes the embers inside the ring and lets the rest fall', () => {
+  const s = scene();
+  s.input.activePointer = { worldX: 70, worldY: 36 };
+  const fire = new FireBending(s);
+  for (let i = 0; i < 10; i++) fire.held.push({ x: 70 + i % 3, y: 36 + i % 2, vx: 0, vy: 0, life: 5 });
+  for (let i = 0; i < 4; i++) fire.held.push({ x: 70 + 60, y: 36 + i, vx: 0, vy: 0, life: 5 });
+  assert.equal(fire.punch(), true);
+  assert.equal(fire.held.length, 0);
+  assert.equal(fire.fireballs.length, 1);
+  assert.equal(fire.fireballs[0].mass, 10);
+  assert.equal(fire.fireballs[0].embers.length, 10);
+  assert.equal(fire.free.length, 4);
+  const y = fire.free[0].y;
+  fire.updateFree(0.1);
+  assert.ok(fire.free[0].y > y, 'spilled embers fall');
+  assert.ok(fire.free.every((d) => !d.punched));
+});
+
+test('a punched fireball keeps the pixel formation it had in the ring', () => {
+  const s = scene();
+  s.input.activePointer = { worldX: 70, worldY: 36 };
+  const fire = new FireBending(s);
+  const shape = [[0, 0], [3, 0], [6, 0], [0, 3], [3, 3]];
+  for (const [dx, dy] of shape) fire.held.push({ x: 70 + dx, y: 36 + dy, vx: 0, vy: 0, life: 5 });
+  fire.punch();
+  const ball = fire.fireballs[0];
+  const placed = ball.embers.map((e) => [Math.round(ball.x + e.ox), Math.round(ball.y + e.oy)]);
+  assert.equal(JSON.stringify(placed), JSON.stringify(shape.map(([dx, dy]) => [70 + dx, 36 + dy])));
+  const spread = (list) => Math.max(...list.map((e) => Math.hypot(e.ox, e.oy)));
+  assert.ok(ball.size >= spread(ball.embers));
+  fire.updateFireballs(0.05);
+  const moved = fire.fireballEmberPoint(ball, ball.embers[0]);
+  assert.ok(Math.abs(moved.x - (ball.x + ball.embers[0].ox)) < 1);
+});
+
+test('a Punch with nothing inside the ring changes nothing and says why', () => {
+  const s = scene();
+  const hints = [];
+  s.attackControl = { feedback: (text) => { hints.push(text); return false; }, capacity: () => 120,
+    holdingTarget: () => null };
+  s.input.activePointer = { worldX: 200, worldY: 36 };
+  const fire = new FireBending(s);
+  for (let i = 0; i < 6; i++) fire.held.push({ x: 70, y: 36, vx: 0, vy: 0, life: 5 });
+  assert.equal(fire.punch(), false);
+  assert.equal(fire.held.length, 6);
+  assert.equal(fire.fireballs.length, 0);
+  assert.equal(fire.free.length, 0);
+  assert.equal(hints.length, 1);
+});
+
+test('Water Punch throws the drops inside the ring and the rest fall back as water', () => {
+  const s = scene();
+  s.input.activePointer = { worldX: 70, worldY: 36 };
+  const bend = new WaterBending(s);
+  for (let i = 0; i < 8; i++) bend.held.push({ x: 70 + i % 3, y: 36, vx: 0, vy: 0 });
+  for (let i = 0; i < 3; i++) bend.held.push({ x: 70, y: 36 + 70, vx: 0, vy: 0 });
+  assert.equal(bend.punch(), true);
+  assert.equal(bend.free.length, 11);
+  assert.equal(bend.free.filter((d) => d.punched).length, 8);
+  const spilled = bend.free.filter((d) => !d.punched);
+  assert.equal(spilled.length, 3);
+  assert.ok(spilled.every((d) => d.vx === 0 && d.vy === 0));
+});
+
+test('Earth Punch hurls the stone inside the ring and drops the cells outside it', () => {
+  const s = scene();
+  s.input.activePointer = { worldX: 70, worldY: 36 };
+  const bend = new EarthBending(s);
+  bend.rock = { x: 70, y: 36, vx: 0, vy: 0, nextSlot: 5, cells: [
+    { ox: 0, oy: 0, shade: 0 }, { ox: 1, oy: 0, shade: 1 }, { ox: 0, oy: 1, shade: 2 },
+    { ox: 20, oy: 0, shade: 3 }, { ox: -20, oy: 0, shade: 0 },
+  ] };
+  assert.equal(bend.punch(), true);
+  assert.equal(bend.thrown.length, 1);
+  assert.equal(bend.thrown[0].cells.length, 3);
+  assert.equal(bend.loosePieces.length, 2);
+  assert.ok(bend.loosePieces.every((pc) => pc.vx === 0 && pc.vy === 0));
+  assert.equal(bend.thrown[0].cells.length + bend.loosePieces.length, 5);
+});
+
+test('Earth Punch counts lifted pieces by where they are, so none are lost', () => {
+  const s = scene();
+  s.input.activePointer = { worldX: 70, worldY: 36 };
+  const bend = new EarthBending(s);
+  bend.rock = { x: 70, y: 36, vx: 0, vy: 0, nextSlot: 3, cells: [{ ox: 0, oy: 0, shade: 0 }] };
+  bend.pieces.push({ x: 71, y: 36, mat: MAT.DIRT, variant: 1, slot: 1 });
+  bend.pieces.push({ x: 200, y: 36, mat: MAT.DIRT, variant: 2, slot: 2 });
+  assert.equal(bend.punch(), true);
+  assert.equal(bend.thrown[0].cells.length, 2);
+  assert.equal(bend.loosePieces.length, 1);
+  assert.equal(bend.pieces.length, 0);
+});
+
+test('Air Punch jets the wisps inside the ring and disperses the rest', () => {
+  const s = scene();
+  s.input.activePointer = { worldX: 70, worldY: 36 };
+  const bend = new AirBending(s);
+  for (let i = 0; i < 9; i++) bend.held.push({ x: 70 + i % 3, y: 36, vx: 0, vy: 0, life: 5 });
+  for (let i = 0; i < 4; i++) bend.held.push({ x: 70 + 80, y: 36, vx: 0, vy: 0, life: 5 });
+  assert.equal(bend.punch(), true);
+  assert.equal(bend.held.length, 0);
+  assert.equal(bend.free.length, 9);
+  assert.ok(bend.free.every((w) => w.jetId));
+});
+
+test('a still cursor settles fire entirely inside the ring; a hard sweep leaves stragglers outside', () => {
+  const s = scene();
+  s.input.activePointer = { worldX: 120, worldY: 60 };
+  const fire = new FireBending(s);
+  fire.active = true;
+  const inside = () => bendSplitZoneFor(fire).inside.length;
+  for (let i = 0; i < 120; i++) { fire.grab(0.02); fire.steerHeld(0.02); s.time.now += 20; }
+  assert.ok(fire.held.length >= 100);
+  for (let i = 0; i < 90; i++) { fire.steerHeld(0.02); s.time.now += 20; }
+  assert.equal(inside(), fire.held.length, 'every ember has settled into the ring');
+  // Flick the cursor sideways: the blob trails behind it, half caught up.
+  s.input.activePointer = { worldX: 150, worldY: 60 };
+  for (let i = 0; i < 4; i++) { fire.steerHeld(0.02); s.time.now += 20; }
+  assert.ok(inside() < fire.held.length, 'a fast sweep leaves embers outside the ring');
+  assert.ok(inside() > 0, 'while some have caught up');
+  const caught = inside();
+  assert.equal(fire.punch(), true);
+  assert.equal(fire.fireballs[0].mass, caught);
+  assert.ok(fire.free.length > 0, 'the stragglers are let go to fall');
+  // Yank it far away instead: nothing is inside, so a Punch does nothing.
+  const far = new FireBending(s);
+  far.held.push({ x: 20, y: 60, vx: 0, vy: 0, life: 5 });
+  assert.equal(far.punch(), false);
 });
 
 test('orbit strikes do not knock the caster back', () => {
@@ -948,7 +1108,7 @@ test('orbit strikes do not knock the caster back', () => {
 test('Bolt Punch turns held embers into a fireball that blasts objects on impact and ignites', () => {
   const s = scene();
   s.remotePlayers.other = { x: 115, y: 20 };
-  s.input.activePointer = { worldX: 200, worldY: 36 };
+  s.input.activePointer = { worldX: 70, worldY: 36 };
   const fire = new FireBending(s);
   for (let i = 0; i < 25; i++) fire.held.push({ x: 70, y: 36, vx: 0, vy: 0, life: 5 });
   s.debris.push({ x: 120, y: 36, mat: MAT.WOOD });
@@ -1042,7 +1202,7 @@ test('doused fireballs create steam effects without blast damage or impulse', ()
 
 test('Bolt Punch keeps its embers visible and sheds fire along its flight', () => {
   const s = scene();
-  s.input.activePointer = { worldX: 200, worldY: 36 };
+  s.input.activePointer = { worldX: 72, worldY: 35 };
   const fire = new FireBending(s);
   for (let i = 0; i < 24; i++) {
     fire.held.push({ x: 70 + i % 5, y: 34 + i % 3, vx: 0, vy: 0, life: 5 });

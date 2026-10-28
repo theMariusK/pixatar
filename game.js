@@ -75,8 +75,9 @@ const FREE_PLAY_MAP_NAMES = {
 };
 
 // ---------- concentric spell wheel ----------
-// E assembles the secondary spell through element -> form -> modifier.
-// Q uses the bending picker below. Spell combinations resolve in spells.js.
+// The E wheel (element -> form -> modifier for the secondary spell) is switched off:
+// nothing opens it, so no spell can be assembled. The wheel, its drawing and the
+// spells in spells.js stay in place, only unreachable. Q uses the bending picker below.
 
 const WHEEL_ELEMENTS = ['Fire', 'Water', 'Earth', 'Air'];
 const WHEEL_FORMS = ['Bolt', 'Nova', 'Beam', 'Ground', 'Orbit', 'Trail', 'Mine', 'Homing'];
@@ -2410,8 +2411,14 @@ class SandScene extends Phaser.Scene {
         : this.bendElement === 'Fire' ? 0xff6600
         : this.bendElement === 'Air' ? 0xdff5fa
         : 0x66b8ff;
-      this.brushGfx.lineStyle(1, ring, p.leftButtonDown() ? 0.8 : 0.45)
-        .strokeCircle(p.worldX, p.worldY, bender.grabRadius * PIXEL);
+      // The ring is the bend zone: where matter is gathered, and the only part of it
+      // a Punch will strike. It is drawn heavier while matter is held, as a cue that
+      // the strike is ready.
+      const zone = bender.zoneRadius ? bender.zoneRadius() : bender.grabRadius * PIXEL;
+      // Past arm's reach the matter stops at the edge of it, and so does the ring.
+      const centre = bender.target && bender.holding ? bender.target() : { x: p.worldX, y: p.worldY };
+      this.brushGfx.lineStyle(bender.holding ? 2 : 1, ring, p.leftButtonDown() || bender.holding ? 0.8 : 0.45)
+        .strokeCircle(centre.x, centre.y, zone);
     } else if (this.leftClickMode === 'primary') {
       // A channelled spell (Flamethrower, Frost Spray, Telekinesis, any Beam) is held
       // rather than fired: start it on press, let updateChannels drive it while the
@@ -2488,11 +2495,12 @@ class SandScene extends Phaser.Scene {
     if (this.player.dead) return;
     const k = this.keys;
 
-    // Q always equips bending; E configures the secondary spell slot.
+    // Q equips bending. E used to open the secondary spell wheel; it is disabled,
+    // so E is read only to keep its press from being queued.
     if (Phaser.Input.Keyboard.JustDown(k.q)) {
       this.openBendWheel();
     }
-    if (Phaser.Input.Keyboard.JustDown(k.e)) this.openWheel('secondary');
+    Phaser.Input.Keyboard.JustDown(k.e);
 
     if (this.wheelOpen) {
       const selection = this.wheelSelections[this.wheelSlot];

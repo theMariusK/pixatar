@@ -52,6 +52,8 @@ function scene(element, action = 'Punch') {
 
 function gather(s, count = 12) {
   const bender = s.benders[s.bendElement];
+  // The cursor rests on the matter, as a player settling it into the ring would.
+  s.input.activePointer.worldX = 70; s.input.activePointer.worldY = 36;
   if (s.bendElement === 'Earth') {
     bender.rock = { x: 70, y: 36, vx: 0, vy: 0, nextSlot: count,
       cells: Array.from({ length: count }, (_, i) => ({ ox: bender.slots[i][0], oy: bender.slots[i][1], shade: i % 4 })) };
